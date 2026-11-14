@@ -19,7 +19,7 @@ The connector is published to Maven Central. Add it under `<dependencies>` in th
 <dependency>
     <groupId>com.velode</groupId>
     <artifactId>identity-spring-boot-starter</artifactId>
-    <version>0.4.1</version>
+    <version>0.5.0</version>
 </dependency>
 ```
 
@@ -86,7 +86,8 @@ ResponseEntity<VelodeIdentity.IdentityUser> me(HttpServletRequest request) {
 ```
 
 Here `identity` is the injected connector; use Spring MVC's `GetMapping`, Spring's `ResponseEntity` and
-Jakarta's `HttpServletRequest`. Check the user once per request; each call verifies access with Identity.
+Jakarta's `HttpServletRequest`. Check the user on every request: the connector asks Identity and trusts its answer
+for five seconds, so a busy page does not wait for Identity each time.
 Use `userId` to own application data and keep roles and permissions in the app.
 When Identity cannot be reached, `currentUser` throws `IdentityUnavailableException`; answer `503` so the user can
 try again, rather than treating them as signed out.

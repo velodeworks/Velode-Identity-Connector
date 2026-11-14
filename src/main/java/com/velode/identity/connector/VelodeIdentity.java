@@ -2,6 +2,7 @@ package com.velode.identity.connector;
 
 import com.velode.identity.connector.ConnectionManager.Connection;
 import com.velode.identity.connector.IdentityClient.Response;
+import com.velode.identity.connector.VerifiedSessions.Remembered;
 import jakarta.servlet.http.Cookie;
 import jakarta.servlet.http.HttpServletRequest;
 import java.net.URLEncoder;
@@ -12,6 +13,12 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executor;
+import java.util.concurrent.Executors;
+import java.util.function.LongSupplier;
 
 /**
  * What a connected application asks Identity: where to send a user to sign in and who a session belongs to.
@@ -28,11 +35,28 @@ public class VelodeIdentity {
     private final VelodeIdentityProperties properties;
     private final ConnectionManager connections;
     private final IdentityClient client;
+    private final VerifiedSessions verified;
+    /** The sessions Identity is being asked about right now, so that each is asked about once at a time. */
+    private final Map<String, CompletableFuture<Optional<IdentityUser>>> asking = new ConcurrentHashMap<>();
+    private final Executor renewals;
 
     VelodeIdentity(VelodeIdentityProperties properties, ConnectionManager connections, IdentityClient client) {
+        this(properties, connections, client, System::nanoTime, Executors.newVirtualThreadPerTaskExecutor());
+    }
+
+    /**
+     * @param nanoTime a clock that only moves forward
+     * @param renewals runs the calls that confirm again a session in use, away from the request that noticed
+     */
+    VelodeIdentity(
+        VelodeIdentityProperties properties, ConnectionManager connections, IdentityClient client, LongSupplier nanoTime,
+        Executor renewals
+    ) {
         this.properties = properties;
         this.connections = connections;
         this.client = client;
+        this.verified = new VerifiedSessions(properties.verificationCache(), properties.verificationCacheSize(), nanoTime);
+        this.renewals = renewals;
     }
 
     /** False until an administrator approves this application in the Identity panel. */
@@ -50,15 +74,118 @@ public class VelodeIdentity {
 
     /** Trades the one-time code Identity appended to the callback for the user's session. */
     public Optional<IdentitySession> exchange(String code) {
-        return call("/session/exchange", "code", code).flatMap(VelodeIdentity::session);
+        Optional<IdentitySession> session = call("/session/exchange", "code", code).flatMap(VelodeIdentity::session);
+        // Identity has just said whose session this is, so the page the user lands on does not ask again.
+        session.ifPresent(issued -> verified.confirm(VerifiedSessions.key(issued.token()), issued.user()));
+        return session;
     }
 
-    /** The user a session token belongs to, while it is valid and the user may still enter this application. */
+    /**
+     * The user a session token belongs to, while it is valid and the user may still enter this application.
+     * What Identity says is trusted for {@code velode.identity.verification-cache} (five seconds unless
+     * configured), so a user who signs out elsewhere or loses access is refused within that time, and so is a
+     * session Identity refused. A session in use is confirmed again shortly before that time ends, away from the
+     * request, so a user who keeps working does not wait for Identity; requests that need the same answer at the
+     * same moment wait for one call.
+     */
     public Optional<IdentityUser> verify(String token) {
+        if (token == null || token.isBlank()) {
+            return Optional.empty();
+        }
+        if (!verified.remembers()) {
+            return ask(token);
+        }
+        String key = VerifiedSessions.key(token);
+        Remembered remembered = verified.find(key);
+        if (remembered == null) {
+            return askOnce(key, token);
+        }
+        if (remembered.dueForRenewal()) {
+            renew(key, token);
+        }
+        return Optional.ofNullable(remembered.user());
+    }
+
+    /**
+     * Stops trusting what Identity said about this token, so the next {@link #verify(String)} asks Identity.
+     * Call it when the application signs the user out by itself; the connector's own sign-out does.
+     */
+    public void forget(String token) {
+        if (token != null) {
+            verified.forget(VerifiedSessions.key(token));
+        }
+    }
+
+    /** Asks Identity, or waits for the answer when another request is already asking about the same session. */
+    private Optional<IdentityUser> askOnce(String key, String token) {
+        CompletableFuture<Optional<IdentityUser>> mine = new CompletableFuture<>();
+        CompletableFuture<Optional<IdentityUser>> first = asking.putIfAbsent(key, mine);
+        if (first != null) {
+            try {
+                return first.join();
+            } catch (CompletionException exception) {
+                if (exception.getCause() instanceof RuntimeException failure) {
+                    throw failure;
+                }
+                throw exception;
+            }
+        }
+        try {
+            Optional<IdentityUser> said = askAndRemember(key, token);
+            mine.complete(said);
+            return said;
+        } catch (RuntimeException failure) {
+            mine.completeExceptionally(failure);
+            throw failure;
+        } finally {
+            asking.remove(key, mine);
+        }
+    }
+
+    /** Confirms again a session in use while its last confirmation still stands; nobody waits for it. */
+    private void renew(String key, String token) {
+        CompletableFuture<Optional<IdentityUser>> mine = new CompletableFuture<>();
+        if (asking.putIfAbsent(key, mine) != null) {
+            return;
+        }
+        try {
+            renewals.execute(() -> {
+                try {
+                    mine.complete(askAndRemember(key, token));
+                } catch (RuntimeException failure) {
+                    // Identity could not be asked: the last confirmation stands until its time ends.
+                    mine.completeExceptionally(failure);
+                } finally {
+                    asking.remove(key, mine);
+                }
+            });
+        } catch (RuntimeException rejected) {
+            asking.remove(key, mine);
+            mine.completeExceptionally(rejected);
+        }
+    }
+
+    /**
+     * Remembers a confirmation and a refusal. Nothing is remembered when Identity was not asked, because this
+     * application is not connected, or did not answer about the session, because it is busy or failing.
+     */
+    private Optional<IdentityUser> askAndRemember(String key, String token) {
+        Optional<Response> answered = send("/verify", Map.of("token", token));
+        Optional<IdentityUser> user = answered.filter(response -> response.status() == 200).flatMap(VelodeIdentity::user);
+        if (user.isPresent()) {
+            verified.confirm(key, user.get());
+        } else if (answered.isPresent() && answered.get().status() == 401) {
+            verified.refuse(key);
+        }
+        return user;
+    }
+
+    /** What Identity says about the token right now. */
+    private Optional<IdentityUser> ask(String token) {
         return call("/verify", "token", token).flatMap(VelodeIdentity::user);
     }
 
-    /** The user signed in through the connector's web endpoints, verified with Identity on every call. */
+    /** The user signed in through the connector's web endpoints, as {@link #verify(String)} confirms them. */
     public Optional<IdentityUser> currentUser(HttpServletRequest request) {
         Cookie[] cookies = request.getCookies();
         if (cookies == null) {
@@ -145,9 +272,11 @@ public class VelodeIdentity {
 
     /** A session is handed to the application only after Identity confirms its token belongs to the same user. */
     private LoginStep confirmed(IdentitySession session) {
-        return verify(session.token()).filter(user -> user.userId().equals(session.user().userId())).isPresent()
-            ? new LoginStep(LoginStep.Next.DONE, null, session, null)
-            : LoginStep.failed(LoginStep.LOGIN_FAILED);
+        if (ask(session.token()).filter(user -> user.userId().equals(session.user().userId())).isEmpty()) {
+            return LoginStep.failed(LoginStep.LOGIN_FAILED);
+        }
+        verified.confirm(VerifiedSessions.key(session.token()), session.user());
+        return new LoginStep(LoginStep.Next.DONE, null, session, null);
     }
 
     private static Map<String, String> fields(String... namesAndValues) {

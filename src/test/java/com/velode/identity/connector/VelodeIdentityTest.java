@@ -27,6 +27,8 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.Executor;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiConsumer;
 import org.junit.jupiter.api.AfterEach;
@@ -56,6 +58,10 @@ class VelodeIdentityTest {
     private final List<String> requests = new ArrayList<>();
     private final MemoryStore store = new MemoryStore();
     private volatile String approvedKey;
+    private volatile boolean sessionEnded;
+    private volatile boolean identityBusy;
+    private volatile CountDownLatch verificationArrived;
+    private volatile CountDownLatch holdVerification;
     private HttpServer identity;
     private MutableClock clock;
     private ConnectionManager connections;
@@ -483,6 +489,266 @@ class VelodeIdentityTest {
         requests.clear();
     }
 
+    /** An application checks its user on every request; Identity is asked once while its answer is fresh. */
+    @Test
+    void should_AskIdentityOnce_when_SameSessionIsVerifiedAgainSoon() {
+        AtomicLong nanos = new AtomicLong();
+        VelodeIdentity remembering = remembering(Duration.ofSeconds(5), nanos);
+
+        assertThat(remembering.verify("valid-token")).isPresent();
+        nanos.addAndGet(Duration.ofMillis(3_999).toNanos());
+        assertThat(remembering.verify("valid-token")).hasValueSatisfying(user -> {
+            assertThat(user.userId()).hasToString(USER_ID);
+            assertThat(user.email()).isEqualTo("user@velode.io");
+        });
+
+        assertThat(verifications()).isOne();
+    }
+
+    /**
+     * A user who keeps working never waits: near the end of the time a confirmation stands, the session is
+     * confirmed again away from the request, and the answer that stood is given meanwhile.
+     */
+    @Test
+    void should_ConfirmAgainWithoutWaiting_when_SessionIsStillInUseNearTheEndOfItsTime() {
+        AtomicLong nanos = new AtomicLong();
+        List<Runnable> renewals = new ArrayList<>();
+        VelodeIdentity remembering = remembering(Duration.ofSeconds(5), nanos, renewals::add);
+        assertThat(remembering.verify("valid-token")).isPresent();
+
+        nanos.addAndGet(Duration.ofSeconds(4).toNanos());
+        assertThat(remembering.verify("valid-token")).isPresent();
+        assertThat(remembering.verify("valid-token")).isPresent();
+        assertThat(verifications()).isOne();
+        assertThat(renewals).hasSize(1);
+
+        renewals.removeFirst().run();
+        assertThat(verifications()).isEqualTo(2);
+        // The renewal counts from when it was made: nine seconds after the first answer the session still stands.
+        nanos.addAndGet(Duration.ofMillis(3_999).toNanos());
+        assertThat(remembering.verify("valid-token")).isPresent();
+        assertThat(verifications()).isEqualTo(2);
+        assertThat(renewals).isEmpty();
+    }
+
+    /** A user who signs out elsewhere or loses access is refused as soon as the session is confirmed again. */
+    @Test
+    void should_RefuseUser_when_IdentityNoLongerConfirmsTheSession() {
+        AtomicLong nanos = new AtomicLong();
+        List<Runnable> renewals = new ArrayList<>();
+        VelodeIdentity remembering = remembering(Duration.ofSeconds(5), nanos, renewals::add);
+        assertThat(remembering.verify("valid-token")).isPresent();
+        sessionEnded = true;
+
+        nanos.addAndGet(Duration.ofSeconds(4).toNanos());
+        assertThat(remembering.verify("valid-token")).isPresent();
+        renewals.removeFirst().run();
+        assertThat(remembering.verify("valid-token")).isEmpty();
+        assertThat(verifications()).isEqualTo(2);
+
+        // Without any request in between, the confirmation simply ends with its time.
+        VelodeIdentity idle = remembering(Duration.ofSeconds(5), nanos, renewals::add);
+        sessionEnded = false;
+        assertThat(idle.verify("valid-token")).isPresent();
+        sessionEnded = true;
+        nanos.addAndGet(Duration.ofSeconds(5).toNanos());
+        assertThat(idle.verify("valid-token")).isEmpty();
+        assertThat(renewals).isEmpty();
+    }
+
+    /** A cookie Identity refuses costs one call, not one per request, and is asked about again when its time ends. */
+    @Test
+    void should_RememberARefusalForTheSameTime() {
+        AtomicLong nanos = new AtomicLong();
+        VelodeIdentity remembering = remembering(Duration.ofSeconds(5), nanos);
+
+        assertThat(remembering.verify("expired-token")).isEmpty();
+        assertThat(remembering.verify("expired-token")).isEmpty();
+        assertThat(remembering.verify(" ")).isEmpty();
+        assertThat(verifications()).isOne();
+
+        nanos.addAndGet(Duration.ofSeconds(5).toNanos());
+        assertThat(remembering.verify("expired-token")).isEmpty();
+        assertThat(verifications()).isEqualTo(2);
+    }
+
+    /** Only what Identity said about the session is remembered, not that it could not be asked or was busy. */
+    @Test
+    void should_RememberNothing_when_IdentityDidNotAnswerAboutTheSession() {
+        VelodeIdentity unconnected = new VelodeIdentity(
+            properties(Duration.ofSeconds(5), 100), connections, new IdentityClient(properties().apiUrl()),
+            new AtomicLong()::get, Runnable::run);
+        assertThat(unconnected.verify("valid-token")).isEmpty();
+
+        VelodeIdentity remembering = remembering(Duration.ofSeconds(5), new AtomicLong());
+        assertThat(remembering.verify("valid-token")).isPresent();
+        assertThat(unconnected.verify("valid-token")).isPresent();
+
+        identityBusy = true;
+        assertThat(remembering.verify("valid-token-2")).isEmpty();
+        identityBusy = false;
+        assertThat(remembering.verify("valid-token-2")).isPresent();
+    }
+
+    @Test
+    void should_AskIdentityEveryTime_when_NothingIsRemembered() {
+        VelodeIdentity asking = remembering(Duration.ZERO, new AtomicLong());
+
+        assertThat(asking.verify("valid-token")).isPresent();
+        assertThat(asking.verify("valid-token")).isPresent();
+        assertThat(asking.verify("expired-token")).isEmpty();
+        assertThat(asking.verify("expired-token")).isEmpty();
+
+        assertThat(verifications()).isEqualTo(4);
+    }
+
+    /** Requests that need the same answer at the same moment wait for one call to Identity. */
+    @Test
+    void should_AskIdentityOnce_when_ManyRequestsVerifyTheSameSessionAtOnce() throws Exception {
+        VelodeIdentity remembering = remembering(Duration.ofSeconds(5), new AtomicLong());
+        CountDownLatch asked = new CountDownLatch(1);
+        CountDownLatch answer = new CountDownLatch(1);
+        verificationArrived = asked;
+        holdVerification = answer;
+
+        try (ExecutorService requests = Executors.newFixedThreadPool(8)) {
+            List<Future<Optional<VelodeIdentity.IdentityUser>>> verified = new ArrayList<>();
+            for (int request = 0; request < 8; request++) {
+                verified.add(requests.submit(() -> remembering.verify("valid-token")));
+            }
+            await(asked);
+            // Give the other seven time to arrive while Identity has not answered the first.
+            TimeUnit.MILLISECONDS.sleep(300);
+            answer.countDown();
+            for (Future<Optional<VelodeIdentity.IdentityUser>> one : verified) {
+                assertThat(one.get(10, TimeUnit.SECONDS)).isPresent();
+            }
+        }
+
+        assertThat(verifications()).isOne();
+    }
+
+    /** Signing in tells whose session it is, so the first page after it does not ask Identity again. */
+    @Test
+    void should_NotAskAgain_when_SessionWasJustIssuedBySignIn() {
+        VelodeIdentity remembering = remembering(Duration.ofSeconds(5), new AtomicLong());
+
+        assertThat(remembering.exchange("valid-code")).isPresent();
+        assertThat(remembering.verify("valid-token")).isPresent();
+        assertThat(verifications()).isZero();
+
+        VelodeIdentity ownPage = remembering(Duration.ofSeconds(5), new AtomicLong());
+        LoginStep started = ownPage.startLogin("user@velode.io", "203.0.113.9", null);
+        assertThat(ownPage.submitLoginCode(started.flow(), "12345678", "203.0.113.9").failed()).isFalse();
+        assertThat(verifications()).isOne();
+        assertThat(ownPage.verify("valid-token")).isPresent();
+        assertThat(verifications()).isOne();
+    }
+
+    @Test
+    void should_AskIdentityAgain_when_ApplicationForgetsTheSession() {
+        VelodeIdentity remembering = remembering(Duration.ofSeconds(5), new AtomicLong());
+        assertThat(remembering.verify("valid-token")).isPresent();
+
+        remembering.forget("another-token");
+        remembering.forget(null);
+        assertThat(remembering.verify("valid-token")).isPresent();
+        assertThat(verifications()).isOne();
+
+        remembering.forget("valid-token");
+        sessionEnded = true;
+        assertThat(remembering.verify("valid-token")).isEmpty();
+        assertThat(verifications()).isEqualTo(2);
+    }
+
+    /** A sign-in is confirmed with Identity itself, whatever was remembered about its token. */
+    @Test
+    void should_AskIdentity_when_ConfirmingTheSessionOfASignIn() {
+        VelodeIdentity remembering = remembering(Duration.ofSeconds(5), new AtomicLong());
+        assertThat(remembering.verify("valid-token")).isPresent();
+        sessionEnded = true;
+
+        LoginStep started = remembering.startLogin("user@velode.io", "203.0.113.9", null);
+        LoginStep finished = remembering.submitLoginCode(started.flow(), "12345678", "203.0.113.9");
+
+        assertThat(finished.failed()).isTrue();
+        assertThat(finished.error()).isEqualTo(LoginStep.LOGIN_FAILED);
+    }
+
+    /** A full memory keeps answering for the sessions it holds; the others are asked about every time. */
+    @Test
+    void should_KeepWhatItRemembers_when_MemoryIsFull() {
+        AtomicLong nanos = new AtomicLong();
+        connectOnce();
+        VelodeIdentity small = new VelodeIdentity(
+            properties(Duration.ofSeconds(5), 2), connections, new IdentityClient(properties().apiUrl()),
+            nanos::get, Runnable::run);
+
+        assertThat(small.verify("valid-token-1")).isPresent();
+        assertThat(small.verify("valid-token-2")).isPresent();
+        assertThat(small.verify("valid-token-3")).isPresent();
+        assertThat(small.verify("valid-token-3")).isPresent();
+        assertThat(small.verify("valid-token-1")).isPresent();
+        assertThat(small.verify("valid-token-2")).isPresent();
+        assertThat(verifications()).isEqualTo(4);
+
+        // Once the first two have expired there is room again.
+        nanos.addAndGet(Duration.ofSeconds(6).toNanos());
+        assertThat(small.verify("valid-token-3")).isPresent();
+        assertThat(small.verify("valid-token-3")).isPresent();
+        assertThat(verifications()).isEqualTo(5);
+    }
+
+    /** An application connected to Identity that trusts what it said for the given time on the given clock. */
+    private VelodeIdentity remembering(Duration kept, AtomicLong nanos) {
+        return remembering(kept, nanos, Runnable::run);
+    }
+
+    private VelodeIdentity remembering(Duration kept, AtomicLong nanos, Executor renewals) {
+        connectOnce();
+        VelodeIdentityProperties properties = properties(kept, 100);
+        return new VelodeIdentity(properties, connections, new IdentityClient(properties.apiUrl()), nanos::get, renewals);
+    }
+
+    private void connectOnce() {
+        if (approvedKey == null) {
+            connections.maintain();
+            approve();
+            connections.maintain();
+        }
+    }
+
+    private VelodeIdentityProperties properties(Duration kept, int size) {
+        return new VelodeIdentityProperties(properties().url(), properties().appUrl(), null, null, kept, size);
+    }
+
+    private synchronized long verifications() {
+        return requests.stream().filter(body -> body.contains("\"token\":")).count();
+    }
+
+    /** An application at rest reads its stored connection once a minute, not every ten seconds. */
+    @Test
+    void should_ReadTheStoredConnectionOnceAMinute_when_ConnectionIsSettled() {
+        connections.tick();
+        approve();
+        connections.tick();
+        assertThat(velodeIdentity.isConnected()).isTrue();
+        int loads = store.loads;
+
+        for (int beat = 0; beat < 5; beat++) {
+            connections.tick();
+        }
+        assertThat(store.loads).isEqualTo(loads);
+        connections.tick();
+        assertThat(store.loads).isGreaterThan(loads);
+
+        // A key due for replacement is not left waiting.
+        loads = store.loads;
+        clock.advance(Duration.ofDays(31));
+        connections.tick();
+        assertThat(store.loads).isGreaterThan(loads);
+    }
+
     private void approve() {
         approvedKey = pendingKeys.iterator().next();
         pendingKeys.clear();
@@ -495,7 +761,7 @@ class VelodeIdentityTest {
 
     private VelodeIdentityProperties properties() {
         return new VelodeIdentityProperties(
-            "http://localhost:" + identity.getAddress().getPort() + "/o/" + ORGANIZATION + "/", "https://lista.velode.io/", null, null);
+            "http://localhost:" + identity.getAddress().getPort() + "/o/" + ORGANIZATION + "/", "https://lista.velode.io/", null, null, Duration.ZERO, null);
     }
 
     private synchronized void answer(HttpExchange exchange) throws IOException {
@@ -503,6 +769,10 @@ class VelodeIdentityTest {
         String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
         String key = exchange.getRequestHeaders().getFirst("X-Server-Connection-Key");
         requests.add(body);
+        if ("/verify".equals(path) && holdVerification != null) {
+            verificationArrived.countDown();
+            await(holdVerification);
+        }
         if ("/connection".equals(path)) {
             String status = key.equals(approvedKey) ? "CONNECTED" : "PENDING";
             if ("PENDING".equals(status)) {
@@ -513,6 +783,8 @@ class VelodeIdentityTest {
                 + ("CONNECTED".equals(status) ? ",\"appSlug\":\"lista\"" : ",\"appSlug\":null") + "}}");
         } else if (!key.equals(approvedKey)) {
             respond(exchange, 401, "{\"status\":401,\"error\":\"INVALID_CONNECTION_KEY\",\"message\":\"Invalid server connection key\"}");
+        } else if (identityBusy) {
+            respond(exchange, 503, "{\"status\":503,\"error\":\"VERIFICATION_BUSY\",\"message\":\"Try again\"}");
         } else if (path.startsWith("/login-flow/")) {
             loginFlow(exchange, path.substring("/login-flow/".length()), body);
         } else if (body.contains("incomplete-")) {
@@ -521,7 +793,8 @@ class VelodeIdentityTest {
         } else if ("/connection/rotate".equals(path)) {
             approvedKey = body.replaceAll(".*\"newKey\":\"([^\"]+)\".*", "$1");
             respond(exchange, 204, "");
-        } else if (body.contains("\"appSlug\":\"lista\"") && (body.contains("valid-token") || body.contains("valid-code"))) {
+        } else if (body.contains("\"appSlug\":\"lista\"") && (body.contains("valid-token") || body.contains("valid-code"))
+            && !(sessionEnded && "/verify".equals(path))) {
             respond(exchange, 200, "{\"success\":true,\"data\":{\"userId\":\"" + USER_ID + "\",\"email\":\"user@velode.io\","
                 + "\"appSlug\":\"lista\",\"sessionToken\":\"valid-token\",\"expiresAt\":\"" + NOW.plus(Duration.ofDays(1)) + "\"}}");
         } else {
@@ -591,10 +864,12 @@ class VelodeIdentityTest {
     private static final class MemoryStore implements ConnectionStore {
 
         private String value;
+        private volatile int loads;
         private volatile BiConsumer<Connection, Connection> beforeCompareAndSet = (expected, updated) -> { };
 
         @Override
         public synchronized Optional<String> load() {
+            loads++;
             return Optional.ofNullable(value);
         }
 

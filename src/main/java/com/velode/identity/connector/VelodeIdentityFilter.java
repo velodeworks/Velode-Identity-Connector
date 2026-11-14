@@ -260,6 +260,14 @@ class VelodeIdentityFilter extends HttpFilter {
             response.sendError(HttpServletResponse.SC_FORBIDDEN, "Sign-out must start in this application");
             return;
         }
+        // The user is signed out here at once, not when the connector next asks Identity about the session.
+        if (request.getCookies() != null) {
+            for (Cookie cookie : request.getCookies()) {
+                if (VelodeIdentity.SESSION_COOKIE.equals(cookie.getName())) {
+                    identity.forget(cookie.getValue());
+                }
+            }
+        }
         response.addCookie(cookie(VelodeIdentity.SESSION_COOKIE, "", Duration.ZERO, request));
         response.sendRedirect(request.getContextPath() + HOME);
     }

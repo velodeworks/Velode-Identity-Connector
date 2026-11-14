@@ -30,10 +30,14 @@ redirects from Identity, so the key is only ever sent to the configured address.
 ## Browser Sessions
 
 After sign-in the application's session token lives in the `velode_identity_session_token` cookie: `HttpOnly`,
-`Secure`, `SameSite=Lax` and scoped to the application's context path. `currentUser` and `verify` ask Identity on every
-call, so a user who is disabled or loses access is refused on their next request.
+`Secure`, `SameSite=Lax` and scoped to the application's context path. `currentUser` and `verify` ask Identity and
+trust its confirmation for five seconds (`velode.identity.verification-cache`), so a user who is disabled or loses
+access is refused within that time; set it to `0` to ask on every call. What Identity said is remembered in
+memory, under a digest of the token and never the token itself, and only when Identity answered about the session:
+nothing is remembered when Identity is busy, failing or out of reach.
 
-Signing out at `/velode-identity/logout` clears the application's cookie only; the user's Identity session remains.
+Signing out at `/velode-identity/logout` clears the application's cookie and what the connector remembered about
+its session; the user's Identity session remains.
 Sign-out requests started by another site are refused.
 
 ## Sign-In Endpoints

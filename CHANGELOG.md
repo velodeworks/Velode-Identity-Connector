@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.5.0
+
+### Upgrade Notes
+
+- `currentUser` and `verify` no longer ask Identity on every call. A session Identity confirmed is trusted for five
+  seconds, so an application that checks its user on every request waits for Identity once in that time instead of
+  each time. A user who signs out elsewhere, is disabled or loses access is refused within those five seconds
+  instead of on the next request. Set `velode.identity.verification-cache=0` to keep asking every time, or up to
+  `1m` to ask less often.
+- `VelodeIdentity.forget(token)` stops trusting an earlier confirmation. Applications that sign users out by
+  themselves call it; the connector's own sign-out does.
+- A session in use is confirmed again shortly before those five seconds end, away from the request, so a user who
+  keeps working never waits for Identity. The time a confirmation is trusted does not grow: each one counts from
+  the moment Identity gave it.
+- A session Identity refuses is remembered for the same time, so a stale cookie costs one call and not one per
+  request. A user who signs in again is recognised at once.
+- Requests that verify the same session at the same moment wait for one call to Identity, and the page a user
+  lands on after signing in does not ask again.
+- `velode.identity.verification-cache-size` (default `100000`) is how many sessions one replica remembers. Beyond
+  it, the remembered sessions keep being answered and the rest are asked about every time; the memory was emptied
+  at 10 000 sessions before.
+- An approved connection is read from its store once a minute instead of every ten seconds.
+
 ## 0.4.1
 
 - `IdentityUnavailableException` is now a public class applications can catch; previously it was nested in an internal
