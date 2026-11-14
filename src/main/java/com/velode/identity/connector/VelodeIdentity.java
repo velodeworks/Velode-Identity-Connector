@@ -12,6 +12,7 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.function.LongSupplier;
 
 /**
  * What a connected application asks Identity: where to send a user to sign in and who a session belongs to.
@@ -28,11 +29,19 @@ public class VelodeIdentity {
     private final VelodeIdentityProperties properties;
     private final ConnectionManager connections;
     private final IdentityClient client;
+    private final VerifiedSessions verified;
 
     VelodeIdentity(VelodeIdentityProperties properties, ConnectionManager connections, IdentityClient client) {
+        this(properties, connections, client, System::nanoTime);
+    }
+
+    VelodeIdentity(
+        VelodeIdentityProperties properties, ConnectionManager connections, IdentityClient client, LongSupplier nanoTime
+    ) {
         this.properties = properties;
         this.connections = connections;
         this.client = client;
+        this.verified = new VerifiedSessions(properties.verificationCache(), nanoTime);
     }
 
     /** False until an administrator approves this application in the Identity panel. */
@@ -53,12 +62,39 @@ public class VelodeIdentity {
         return call("/session/exchange", "code", code).flatMap(VelodeIdentity::session);
     }
 
-    /** The user a session token belongs to, while it is valid and the user may still enter this application. */
+    /**
+     * The user a session token belongs to, while it is valid and the user may still enter this application.
+     * Identity's confirmation is trusted for {@code velode.identity.verification-cache} (five seconds unless
+     * configured) before Identity is asked again, so a user who signs out elsewhere or loses access is refused
+     * within that time. A token Identity did not confirm is asked about every time.
+     */
     public Optional<IdentityUser> verify(String token) {
+        if (token == null || token.isBlank()) {
+            return Optional.empty();
+        }
+        Optional<IdentityUser> remembered = verified.find(token);
+        if (remembered.isPresent()) {
+            return remembered;
+        }
+        Optional<IdentityUser> confirmed = ask(token);
+        confirmed.ifPresent(user -> verified.remember(token, user));
+        return confirmed;
+    }
+
+    /**
+     * Stops trusting an earlier confirmation of this token, so the next {@link #verify(String)} asks Identity.
+     * Call it when the application signs the user out by itself; the connector's own sign-out does.
+     */
+    public void forget(String token) {
+        verified.forget(token);
+    }
+
+    /** What Identity says about the token right now. */
+    private Optional<IdentityUser> ask(String token) {
         return call("/verify", "token", token).flatMap(VelodeIdentity::user);
     }
 
-    /** The user signed in through the connector's web endpoints, verified with Identity on every call. */
+    /** The user signed in through the connector's web endpoints, as {@link #verify(String)} confirms them. */
     public Optional<IdentityUser> currentUser(HttpServletRequest request) {
         Cookie[] cookies = request.getCookies();
         if (cookies == null) {
@@ -145,7 +181,7 @@ public class VelodeIdentity {
 
     /** A session is handed to the application only after Identity confirms its token belongs to the same user. */
     private LoginStep confirmed(IdentitySession session) {
-        return verify(session.token()).filter(user -> user.userId().equals(session.user().userId())).isPresent()
+        return ask(session.token()).filter(user -> user.userId().equals(session.user().userId())).isPresent()
             ? new LoginStep(LoginStep.Next.DONE, null, session, null)
             : LoginStep.failed(LoginStep.LOGIN_FAILED);
     }

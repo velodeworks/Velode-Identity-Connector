@@ -42,12 +42,19 @@ Packages requires even for public packages. Keep it out of git.
 `velode.identity.name` overrides the name suggested to the administrator (default `spring.application.name`) and
 `velode.identity.key-rotation` how often the key is replaced (default `30d`).
 
+`velode.identity.verification-cache` is how long the connector trusts Identity's confirmation of a session before
+asking again (default `5s`, at most `1m`). An application checks its user on every request, and without this each
+request would wait for Identity. Within that time a user who signed out in another application, was disabled or lost
+access is still let in; `0` asks Identity on every call. Each replica of the application remembers on its own.
+
 ## Browser Flows
 
 `VelodeIdentity` also offers `loginUrl`, `exchange` and `verify` for applications that manage the browser flow
-themselves. `currentUser` and `verify` ask Identity on every call, so call them once per request. Every method that
-asks Identity throws `IdentityUnavailableException` when Identity cannot be reached; the connector's own sign-in
-addresses answer `503` in that case.
+themselves. `currentUser` and `verify` ask Identity and trust its confirmation for
+`velode.identity.verification-cache`; a token Identity does not confirm is asked about every time. An application
+that signs users out by itself calls `forget(token)` so the sign-out takes effect at once, as the connector's own
+sign-out does. Every method that asks Identity throws `IdentityUnavailableException` when Identity cannot be
+reached; the connector's own sign-in addresses answer `503` in that case.
 
 ## Your Own Sign-In Page
 

@@ -27,6 +27,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiConsumer;
 import org.junit.jupiter.api.AfterEach;
@@ -56,6 +57,7 @@ class VelodeIdentityTest {
     private final List<String> requests = new ArrayList<>();
     private final MemoryStore store = new MemoryStore();
     private volatile String approvedKey;
+    private volatile boolean sessionEnded;
     private HttpServer identity;
     private MutableClock clock;
     private ConnectionManager connections;
@@ -483,6 +485,100 @@ class VelodeIdentityTest {
         requests.clear();
     }
 
+    /** An application checks its user on every request; Identity is asked once while its answer is fresh. */
+    @Test
+    void should_AskIdentityOnce_when_SameSessionIsVerifiedAgainSoon() {
+        AtomicLong nanos = new AtomicLong();
+        VelodeIdentity remembering = remembering(Duration.ofSeconds(5), nanos);
+
+        assertThat(remembering.verify("valid-token")).isPresent();
+        nanos.addAndGet(Duration.ofMillis(4_999).toNanos());
+        assertThat(remembering.verify("valid-token")).hasValueSatisfying(user -> {
+            assertThat(user.userId()).hasToString(USER_ID);
+            assertThat(user.email()).isEqualTo("user@velode.io");
+        });
+        assertThat(verifications()).isOne();
+
+        nanos.addAndGet(Duration.ofMillis(1).toNanos());
+        assertThat(remembering.verify("valid-token")).isPresent();
+        assertThat(verifications()).isEqualTo(2);
+    }
+
+    /** A user who signs out elsewhere or loses access is refused once the remembered confirmation is too old. */
+    @Test
+    void should_RefuseUserWithinTheConfiguredTime_when_IdentityNoLongerConfirmsTheSession() {
+        AtomicLong nanos = new AtomicLong();
+        VelodeIdentity remembering = remembering(Duration.ofSeconds(5), nanos);
+        assertThat(remembering.verify("valid-token")).isPresent();
+
+        sessionEnded = true;
+        assertThat(remembering.verify("valid-token")).isPresent();
+        nanos.addAndGet(Duration.ofSeconds(5).toNanos());
+        assertThat(remembering.verify("valid-token")).isEmpty();
+        assertThat(remembering.verify("valid-token")).isEmpty();
+        assertThat(verifications()).isEqualTo(3);
+    }
+
+    @Test
+    void should_AskIdentityEveryTime_when_SessionIsNotConfirmedOrNothingIsRemembered() {
+        VelodeIdentity remembering = remembering(Duration.ofSeconds(5), new AtomicLong());
+        assertThat(remembering.verify("expired-token")).isEmpty();
+        assertThat(remembering.verify("expired-token")).isEmpty();
+        assertThat(remembering.verify(" ")).isEmpty();
+        assertThat(verifications()).isEqualTo(2);
+
+        VelodeIdentity asking = remembering(Duration.ZERO, new AtomicLong());
+        assertThat(asking.verify("valid-token")).isPresent();
+        assertThat(asking.verify("valid-token")).isPresent();
+        assertThat(verifications()).isEqualTo(4);
+    }
+
+    @Test
+    void should_AskIdentityAgain_when_ApplicationForgetsTheSession() {
+        VelodeIdentity remembering = remembering(Duration.ofSeconds(5), new AtomicLong());
+        assertThat(remembering.verify("valid-token")).isPresent();
+
+        remembering.forget("another-token");
+        remembering.forget(null);
+        assertThat(remembering.verify("valid-token")).isPresent();
+        assertThat(verifications()).isOne();
+
+        remembering.forget("valid-token");
+        sessionEnded = true;
+        assertThat(remembering.verify("valid-token")).isEmpty();
+        assertThat(verifications()).isEqualTo(2);
+    }
+
+    /** A sign-in is confirmed with Identity itself, whatever was remembered about its token. */
+    @Test
+    void should_AskIdentity_when_ConfirmingTheSessionOfASignIn() {
+        VelodeIdentity remembering = remembering(Duration.ofSeconds(5), new AtomicLong());
+        assertThat(remembering.verify("valid-token")).isPresent();
+        sessionEnded = true;
+
+        LoginStep started = remembering.startLogin("user@velode.io", "203.0.113.9", null);
+        LoginStep finished = remembering.submitLoginCode(started.flow(), "12345678", "203.0.113.9");
+
+        assertThat(finished.failed()).isTrue();
+        assertThat(finished.error()).isEqualTo(LoginStep.LOGIN_FAILED);
+    }
+
+    /** An application connected to Identity that trusts a confirmation for the given time on the given clock. */
+    private VelodeIdentity remembering(Duration kept, AtomicLong nanos) {
+        if (approvedKey == null) {
+            connections.maintain();
+            approve();
+            connections.maintain();
+        }
+        VelodeIdentityProperties properties = new VelodeIdentityProperties(
+            properties().url(), properties().appUrl(), null, null, kept);
+        return new VelodeIdentity(properties, connections, new IdentityClient(properties.apiUrl()), nanos::get);
+    }
+
+    private synchronized long verifications() {
+        return requests.stream().filter(body -> body.contains("\"token\":")).count();
+    }
+
     private void approve() {
         approvedKey = pendingKeys.iterator().next();
         pendingKeys.clear();
@@ -495,7 +591,7 @@ class VelodeIdentityTest {
 
     private VelodeIdentityProperties properties() {
         return new VelodeIdentityProperties(
-            "http://localhost:" + identity.getAddress().getPort() + "/o/" + ORGANIZATION + "/", "https://lista.velode.io/", null, null);
+            "http://localhost:" + identity.getAddress().getPort() + "/o/" + ORGANIZATION + "/", "https://lista.velode.io/", null, null, Duration.ZERO);
     }
 
     private synchronized void answer(HttpExchange exchange) throws IOException {
@@ -521,7 +617,8 @@ class VelodeIdentityTest {
         } else if ("/connection/rotate".equals(path)) {
             approvedKey = body.replaceAll(".*\"newKey\":\"([^\"]+)\".*", "$1");
             respond(exchange, 204, "");
-        } else if (body.contains("\"appSlug\":\"lista\"") && (body.contains("valid-token") || body.contains("valid-code"))) {
+        } else if (body.contains("\"appSlug\":\"lista\"") && (body.contains("valid-token") || body.contains("valid-code"))
+            && !(sessionEnded && "/verify".equals(path))) {
             respond(exchange, 200, "{\"success\":true,\"data\":{\"userId\":\"" + USER_ID + "\",\"email\":\"user@velode.io\","
                 + "\"appSlug\":\"lista\",\"sessionToken\":\"valid-token\",\"expiresAt\":\"" + NOW.plus(Duration.ofDays(1)) + "\"}}");
         } else {
