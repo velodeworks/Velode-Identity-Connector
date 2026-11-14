@@ -23,6 +23,7 @@ class ConnectionManager implements SmartLifecycle {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(ConnectionManager.class);
     private static final Duration CHECK_INTERVAL = Duration.ofSeconds(10);
+    private static final int SETTLED_CHECK_EVERY = 6;
 
     private final VelodeIdentityProperties properties;
     private final String name;
@@ -34,6 +35,7 @@ class ConnectionManager implements SmartLifecycle {
     private volatile Connection connection;
     private String announcedStatus;
     private ScheduledExecutorService scheduler;
+    private int settledChecksSkipped;
 
     ConnectionManager(
         VelodeIdentityProperties properties,
@@ -58,7 +60,7 @@ class ConnectionManager implements SmartLifecycle {
             thread.setDaemon(true);
             return thread;
         });
-        scheduler.scheduleWithFixedDelay(this::maintainQuietly, 0, CHECK_INTERVAL.toSeconds(), TimeUnit.SECONDS);
+        scheduler.scheduleWithFixedDelay(this::tick, 0, CHECK_INTERVAL.toSeconds(), TimeUnit.SECONDS);
     }
 
     @Override
@@ -80,7 +82,19 @@ class ConnectionManager implements SmartLifecycle {
         return current != null && current.appSlug() != null ? Optional.of(current) : Optional.empty();
     }
 
-    private void maintainQuietly() {
+    /**
+     * One beat of the schedule. A connection that is approved and not due for a new key only changes when another
+     * replica replaces the key, which a refused call also reveals at once, so it is read from the store once a
+     * minute; a connection still waiting for approval, or due for a new key, is looked at on every beat.
+     */
+    void tick() {
+        Connection current = connection;
+        boolean settled = current != null && current.appSlug() != null
+            && current.rotatedAt().plus(properties.keyRotation()).isAfter(clock.instant());
+        if (settled && ++settledChecksSkipped < SETTLED_CHECK_EVERY) {
+            return;
+        }
+        settledChecksSkipped = 0;
         try {
             maintain();
         } catch (RuntimeException exception) {

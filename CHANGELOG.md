@@ -11,6 +11,17 @@
   `1m` to ask less often.
 - `VelodeIdentity.forget(token)` stops trusting an earlier confirmation. Applications that sign users out by
   themselves call it; the connector's own sign-out does.
+- A session in use is confirmed again shortly before those five seconds end, away from the request, so a user who
+  keeps working never waits for Identity. The time a confirmation is trusted does not grow: each one counts from
+  the moment Identity gave it.
+- A session Identity refuses is remembered for the same time, so a stale cookie costs one call and not one per
+  request. A user who signs in again is recognised at once.
+- Requests that verify the same session at the same moment wait for one call to Identity, and the page a user
+  lands on after signing in does not ask again.
+- `velode.identity.verification-cache-size` (default `100000`) is how many sessions one replica remembers. Beyond
+  it, the remembered sessions keep being answered and the rest are asked about every time; the memory was emptied
+  at 10 000 sessions before.
+- An approved connection is read from its store once a minute instead of every ten seconds.
 
 ## 0.4.1
 

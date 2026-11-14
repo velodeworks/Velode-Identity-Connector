@@ -14,16 +14,19 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  * @param appUrl public HTTPS origin of this application
  * @param name name suggested to the administrator; defaults to {@code spring.application.name}
  * @param keyRotation how often the connector replaces its own key
- * @param verificationCache how long a session Identity confirmed is trusted before Identity is asked again;
- *     zero asks on every call
+ * @param verificationCache how long what Identity said about a session is trusted before Identity is asked
+ *     again; zero asks on every call
+ * @param verificationCacheSize sessions remembered at once at most; beyond it, the rest are asked about every time
  */
 @ConfigurationProperties(prefix = "velode.identity")
 public record VelodeIdentityProperties(
-    String url, String appUrl, String name, Duration keyRotation, Duration verificationCache
+    String url, String appUrl, String name, Duration keyRotation, Duration verificationCache, Integer verificationCacheSize
 ) {
 
     private static final String ORGANIZATION_SEGMENT = "/o/";
     private static final Duration DEFAULT_VERIFICATION_CACHE = Duration.ofSeconds(5);
+    /** About a hundred bytes each: room for every user at work on one replica of a large application. */
+    private static final int DEFAULT_VERIFICATION_CACHE_SIZE = 100_000;
     /** A user who lost access keeps it for this long at most, so it is kept short. */
     private static final Duration LONGEST_VERIFICATION_CACHE = Duration.ofMinutes(1);
     private static final Set<String> LOOPBACK_HOSTS = Set.of("localhost", "127.0.0.1", "[::1]");
@@ -36,6 +39,10 @@ public record VelodeIdentityProperties(
         if (verificationCache.isNegative() || verificationCache.compareTo(LONGEST_VERIFICATION_CACHE) > 0) {
             throw new IllegalStateException("velode.identity.verification-cache must be between 0 and "
                 + LONGEST_VERIFICATION_CACHE.toSeconds() + " seconds");
+        }
+        verificationCacheSize = verificationCacheSize == null ? DEFAULT_VERIFICATION_CACHE_SIZE : verificationCacheSize;
+        if (verificationCacheSize < 1) {
+            throw new IllegalStateException("velode.identity.verification-cache-size must be at least 1");
         }
         if (url == null || !url.contains(ORGANIZATION_SEGMENT)) {
             throw new IllegalStateException(
