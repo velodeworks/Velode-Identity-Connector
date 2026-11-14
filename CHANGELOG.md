@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Upgrade Notes
+
+- `currentUser` and `verify` no longer ask Identity on every call. A session Identity confirmed is trusted for five
+  seconds, so an application that checks its user on every request waits for Identity once in that time instead of
+  each time. A user who signs out elsewhere, is disabled or loses access is refused within those five seconds
+  instead of on the next request. Set `velode.identity.verification-cache=0` to keep asking every time, or up to
+  `1m` to ask less often.
+- `VelodeIdentity.forget(token)` stops trusting an earlier confirmation. Applications that sign users out by
+  themselves call it; the connector's own sign-out does.
+
 ## 0.4.1
 
 - `IdentityUnavailableException` is now a public class applications can catch; previously it was nested in an internal

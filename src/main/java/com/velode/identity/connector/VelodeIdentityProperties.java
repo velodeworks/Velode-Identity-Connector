@@ -14,17 +14,29 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  * @param appUrl public HTTPS origin of this application
  * @param name name suggested to the administrator; defaults to {@code spring.application.name}
  * @param keyRotation how often the connector replaces its own key
+ * @param verificationCache how long a session Identity confirmed is trusted before Identity is asked again;
+ *     zero asks on every call
  */
 @ConfigurationProperties(prefix = "velode.identity")
-public record VelodeIdentityProperties(String url, String appUrl, String name, Duration keyRotation) {
+public record VelodeIdentityProperties(
+    String url, String appUrl, String name, Duration keyRotation, Duration verificationCache
+) {
 
     private static final String ORGANIZATION_SEGMENT = "/o/";
+    private static final Duration DEFAULT_VERIFICATION_CACHE = Duration.ofSeconds(5);
+    /** A user who lost access keeps it for this long at most, so it is kept short. */
+    private static final Duration LONGEST_VERIFICATION_CACHE = Duration.ofMinutes(1);
     private static final Set<String> LOOPBACK_HOSTS = Set.of("localhost", "127.0.0.1", "[::1]");
 
     public VelodeIdentityProperties {
         url = withoutTrailingSlash(url);
         appUrl = withoutTrailingSlash(appUrl);
         keyRotation = keyRotation == null ? Duration.ofDays(30) : keyRotation;
+        verificationCache = verificationCache == null ? DEFAULT_VERIFICATION_CACHE : verificationCache;
+        if (verificationCache.isNegative() || verificationCache.compareTo(LONGEST_VERIFICATION_CACHE) > 0) {
+            throw new IllegalStateException("velode.identity.verification-cache must be between 0 and "
+                + LONGEST_VERIFICATION_CACHE.toSeconds() + " seconds");
+        }
         if (url == null || !url.contains(ORGANIZATION_SEGMENT)) {
             throw new IllegalStateException(
                 "velode.identity.url must be the organization address from the Identity panel, ending in /o/{organizationId}");

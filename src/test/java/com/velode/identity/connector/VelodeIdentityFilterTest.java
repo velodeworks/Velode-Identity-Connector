@@ -167,6 +167,17 @@ class VelodeIdentityFilterTest {
         assertThat(signedOut.getCookie(VelodeIdentity.SESSION_COOKIE).getMaxAge()).isZero();
     }
 
+    /** Signing out takes effect at once, without waiting for the connector to ask Identity about the session again. */
+    @Test
+    void should_StopTrustingTheSession_when_UserSignsOut() throws Exception {
+        MockHttpServletRequest signOut = new MockHttpServletRequest("GET", VelodeIdentityFilter.LOGOUT_PATH);
+        signOut.setCookies(new Cookie("another", "value"), new Cookie(VelodeIdentity.SESSION_COOKIE, SESSION_TOKEN));
+
+        send(signOut);
+
+        assertThat(identity.forgotten).containsExactly(SESSION_TOKEN);
+    }
+
     @ParameterizedTest
     @CsvSource(delimiter = '|', value = {
         "GET  | start      | application/json | {}                 | 405 | METHOD_NOT_ALLOWED",
@@ -275,10 +286,17 @@ class VelodeIdentityFilterTest {
     private static final class StubIdentity extends VelodeIdentity {
 
         private final List<String> exchanged = new ArrayList<>();
+        private final List<String> forgotten = new ArrayList<>();
         private boolean connected = true;
 
         StubIdentity() {
-            super(null, null, null);
+            super(new VelodeIdentityProperties(
+                "https://iam.velode.io/o/organization", "https://lista.velode.io", null, null, null), null, null);
+        }
+
+        @Override
+        public void forget(String token) {
+            forgotten.add(token);
         }
 
         @Override

@@ -1,5 +1,6 @@
 package com.velode.identity.connector;
 
+import java.time.Duration;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -17,7 +18,7 @@ class VelodeIdentityPropertiesTest {
 
     @Test
     void should_AcceptHttpsAddressesAndDeriveTheApiBase() {
-        VelodeIdentityProperties properties = new VelodeIdentityProperties(ORGANIZATION_URL + "/", APP_URL + "/", null, null);
+        VelodeIdentityProperties properties = new VelodeIdentityProperties(ORGANIZATION_URL + "/", APP_URL + "/", null, null, null);
 
         assertThat(properties.url()).isEqualTo(ORGANIZATION_URL);
         assertThat(properties.appUrl()).isEqualTo(APP_URL);
@@ -25,10 +26,28 @@ class VelodeIdentityPropertiesTest {
             .isEqualTo("https://iam.velode.io/api/organizations/891602e0-f43a-41de-a768-281aeaf8b913");
     }
 
+    @Test
+    void should_TrustAConfirmationBriefly_when_NothingElseIsConfigured() {
+        assertThat(new VelodeIdentityProperties(ORGANIZATION_URL, APP_URL, null, null, null).verificationCache())
+            .isEqualTo(Duration.ofSeconds(5));
+        assertThat(new VelodeIdentityProperties(ORGANIZATION_URL, APP_URL, null, null, Duration.ZERO).verificationCache())
+            .isZero();
+        assertThat(new VelodeIdentityProperties(ORGANIZATION_URL, APP_URL, null, null, Duration.ofMinutes(1))
+            .verificationCache()).isEqualTo(Duration.ofMinutes(1));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"-PT1S", "PT1M1S", "PT1H"})
+    void should_RefuseToStart_when_AConfirmationWouldBeTrustedForTooLong(String kept) {
+        assertThatThrownBy(() -> new VelodeIdentityProperties(ORGANIZATION_URL, APP_URL, null, null, Duration.parse(kept)))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessage("velode.identity.verification-cache must be between 0 and 60 seconds");
+    }
+
     @ParameterizedTest
     @ValueSource(strings = {"http://localhost:8080", "http://127.0.0.1:8080", "http://[::1]:8080", "HTTP://LOCALHOST"})
     void should_AcceptPlainHttp_when_AddressIsThisMachine(String local) {
-        assertThat(new VelodeIdentityProperties(local + "/o/organization", local, null, null).appUrl()).isEqualTo(local);
+        assertThat(new VelodeIdentityProperties(local + "/o/organization", local, null, null, null).appUrl()).isEqualTo(local);
     }
 
     @ParameterizedTest
@@ -43,7 +62,7 @@ class VelodeIdentityPropertiesTest {
         "https://iam velode.io/o/organization"
     })
     void should_RefuseOrganizationAddress_when_ItIsNotSecureOrNotAnOrganization(String url) {
-        assertThatThrownBy(() -> new VelodeIdentityProperties(url, APP_URL, null, null))
+        assertThatThrownBy(() -> new VelodeIdentityProperties(url, APP_URL, null, null, null))
             .isInstanceOf(IllegalStateException.class)
             .hasMessageContaining("velode.identity.url");
     }
@@ -58,7 +77,7 @@ class VelodeIdentityPropertiesTest {
         " "
     })
     void should_RefuseApplicationAddress_when_ItIsNotAnHttpsOrigin(String appUrl) {
-        assertThatThrownBy(() -> new VelodeIdentityProperties(ORGANIZATION_URL, appUrl, null, null))
+        assertThatThrownBy(() -> new VelodeIdentityProperties(ORGANIZATION_URL, appUrl, null, null, null))
             .isInstanceOf(IllegalStateException.class)
             .hasMessageContaining("velode.identity.app-url");
     }
