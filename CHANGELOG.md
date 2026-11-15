@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.6.0
+
+### Upgrade Notes
+
+- Signing out is now a `POST`. A link to `/velode-identity/logout` answers `405`; replace it with a form:
+  `<form method="post" action="/velode-identity/logout"><button type="submit">Sign out</button></form>`.
+  An application with Spring Security's CSRF protection on sends its CSRF token with that form or excludes
+  `/velode-identity/logout`, as it does for `/velode-identity/flow/**`.
+- A sign-out that carries neither an `Origin` nor a `Sec-Fetch-Site` header is refused with `403`. Browsers send
+  them with a form, but a page served with `Referrer-Policy: no-referrer` sends `Origin: null` on its forms and is
+  refused.
+
+### Security
+
+- Another site can no longer sign a user out with a link, which worked in browsers that do not send
+  `Sec-Fetch-Site`.
+
 ## 0.5.0
 
 ### Upgrade Notes

@@ -400,14 +400,16 @@ class VelodeIdentityTest {
         assertThat(started.getStatus()).isEqualTo(200);
         assertThat(started.getHeader("X-Content-Type-Options")).isEqualTo("nosniff");
 
-        MockHttpServletRequest forgedLogout = new MockHttpServletRequest("GET", "/velode-identity/logout");
+        MockHttpServletRequest forgedLogout = new MockHttpServletRequest("POST", "/velode-identity/logout");
         forgedLogout.addHeader("Sec-Fetch-Site", "cross-site");
+        forgedLogout.addHeader("Origin", "https://evil.example");
         MockHttpServletResponse kept = send(filter, forgedLogout);
         assertThat(kept.getStatus()).isEqualTo(403);
         assertThat(kept.getCookie(VelodeIdentity.SESSION_COOKIE)).isNull();
 
-        MockHttpServletRequest logout = new MockHttpServletRequest("GET", "/velode-identity/logout");
+        MockHttpServletRequest logout = new MockHttpServletRequest("POST", "/velode-identity/logout");
         logout.addHeader("Sec-Fetch-Site", "same-origin");
+        logout.addHeader("Origin", "https://lista.velode.io");
         MockHttpServletResponse signedOut = send(filter, logout);
         assertThat(signedOut.getRedirectedUrl()).isEqualTo("/");
         assertThat(signedOut.getCookie(VelodeIdentity.SESSION_COOKIE).getMaxAge()).isZero();

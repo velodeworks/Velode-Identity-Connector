@@ -36,9 +36,11 @@ access is refused within that time; set it to `0` to ask on every call. What Ide
 memory, under a digest of the token and never the token itself, and only when Identity answered about the session:
 nothing is remembered when Identity is busy, failing or out of reach.
 
-Signing out at `/velode-identity/logout` clears the application's cookie and what the connector remembered about
-its session; the user's Identity session remains.
-Sign-out requests started by another site are refused.
+Signing out is a `POST` to `/velode-identity/logout`. It clears the application's cookie and what the connector
+remembered about its session; the user's Identity session remains.
+Any other method answers `405`, because another site can make a browser follow a link with the session cookie.
+A `POST` is refused with `403` when its `Origin` differs from `velode.identity.app-url`, when its `Sec-Fetch-Site`
+names another site, or when it carries neither header, so another site's form cannot sign a user out either.
 
 ## Sign-In Endpoints
 
@@ -70,7 +72,9 @@ Sign-out requests started by another site are refused.
   `currentUser` on every protected route and apply the application's own roles.
 - **Protect the application's own state-changing routes against CSRF.** `SameSite=Lax` stops most cross-site
   requests, but not those from sibling subdomains. With Spring Security, keep CSRF protection on for the application's
-  routes; exclude `/velode-identity/flow/**` or send the CSRF header with those requests.
+  routes; exclude `/velode-identity/flow/**` or send the CSRF header with those requests. Spring Security checks a
+  request before the connector sees it, so the sign-out form needs the same: send the CSRF token with it or exclude
+  `/velode-identity/logout`.
 - **Keep the connector current.** Only the latest minor version receives security fixes.
 
 ## Checklist
@@ -79,4 +83,5 @@ Sign-out requests started by another site are refused.
 - [ ] `server.forward-headers-strategy` matches the deployment, and only the proxy can reach the application.
 - [ ] `/velode-identity/**` is permitted; every other route checks the user and the application's permissions.
 - [ ] CSRF protection covers the application's own state-changing routes.
+- [ ] Sign-out is a form posted to `/velode-identity/logout`, with the CSRF token when CSRF protection is on.
 - [ ] The `velode_identity_connection` table and backups are restricted.
