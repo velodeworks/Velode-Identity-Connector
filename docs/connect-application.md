@@ -9,7 +9,9 @@ A global administrator opens the organization's panel in Identity, confirms it i
 domain under **Settings > General > Application domains**. The organization needs working authentication and
 a user who can sign in. Global and organization sign-ins are separate.
 
-Open **Connect app** and copy the organization address for step 3.
+Open **Connect app** and copy the organization address for step 3. In the same panel, create a connection
+invitation for the application's address, such as `https://app.example.com`, and copy it too. The invitation is
+shown once, works once and is valid for one hour, so create it when the application is ready to start.
 
 ## 2. Add The Connector
 
@@ -29,14 +31,20 @@ even for public packages; see [installing from GitHub Packages](advanced-usage.m
 
 ## 3. Configure The Application
 
-Set these in the application's `application.properties`, using the address copied from Identity:
+Set these in the application's `application.properties`, using the address and the invitation copied from
+Identity:
 
 ```properties
 velode.identity.url=https://identity.example.com/o/ORGANIZATION_ID
 velode.identity.app-url=https://app.example.com
+velode.identity.invitation=INVITATION_FROM_THE_PANEL
 ```
 
-The app URL is an origin, without a path, on an allowed application domain.
+The app URL is an origin, without a path, on an allowed application domain, and the address the invitation was
+created for.
+The invitation only lets the application ask to connect, once. It is not the connection key, which the connector
+makes by itself, and it is no longer needed once the application is connected. Until then keep it out of git, for
+example by setting the environment variable `VELODE_IDENTITY_INVITATION` instead.
 Both addresses must use `https`, because the connection key and users' session tokens travel to them; the
 connector refuses to start otherwise. Plain `http` is accepted only for `localhost`, `127.0.0.1` and `[::1]`,
 for local development.
@@ -59,11 +67,18 @@ verified user returned in step 6 and the app's own authorization rules.
 
 ## 5. Start And Approve
 
-Start the application. Its log shows a waiting message with a code, such as `4F7-A92`.
-In the organization's **Connect app** panel, compare that code and the app's origin, then approve.
+Start the application while the invitation is valid. Its log shows a waiting message with a code, such as
+`4F7-A92`. In the organization's **Connect app** panel, compare that code and the app's origin, then approve.
+If the log says instead that Identity needs an invitation, or did not accept the one it was given, create a new
+one for the application's address, set it and start the application again.
 
 Choose **All users of the organization**, or **Only the people I choose** and add the intended users to the app's
 access list. The connector notices approval within ten seconds. No restart or manual connection key is needed.
+A request waits for approval while the application keeps running, for 24 hours at most; after that, asking again
+takes a new invitation.
+
+Once the log says the application is connected, remove `velode.identity.invitation`: it has been used, and a
+connected application does not need one.
 
 ## 6. Sign In And Read The User
 

@@ -4,6 +4,13 @@
 
 ### Upgrade Notes
 
+- Connecting an application needs a connection invitation and this version. An administrator creates the invitation
+  for the application's address in the Identity panel, and the application sets it as `velode.identity.invitation`
+  before it starts. It works once and for one hour, and can be removed once the application is connected.
+- Applications that are already connected are unaffected and need no invitation; their keys are replaced as before.
+- Connecting again, after an administrator disconnects the application or its stored connection is lost, needs a
+  new invitation. Until it has one the application keeps running, answers `503` to sign-in and says in its log what
+  to do.
 - Signing out is now a `POST`. A link to `/velode-identity/logout` answers `405`; replace it with a form:
   `<form method="post" action="/velode-identity/logout"><button type="submit">Sign out</button></form>`.
   An application with Spring Security's CSRF protection on sends its CSRF token with that form or excludes
@@ -14,6 +21,8 @@
 
 ### Security
 
+- Identity registers a connector's request only with an administrator's invitation, so a stranger who knows an
+  organization's address can no longer fill its list of requests and keep other applications from connecting.
 - Another site can no longer sign a user out with a link, which worked in browsers that do not send
   `Sec-Fetch-Site`.
 - The connector reads at most 64 KB of an answer from Identity, whose answers stay under 2 KB, so a faulty or

@@ -321,7 +321,8 @@ class VelodeIdentityFilterTest {
 
         StubIdentity() {
             super(new VelodeIdentityProperties(
-                "https://iam.velode.io/o/organization", "https://lista.velode.io", null, null, null, null), null, null);
+                "https://iam.velode.io/o/organization", "https://lista.velode.io", null, null, null, null, null),
+                null, null);
         }
 
         @Override

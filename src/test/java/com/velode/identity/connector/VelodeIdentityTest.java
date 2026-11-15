@@ -34,6 +34,9 @@ import java.util.function.BiConsumer;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.springframework.boot.test.system.CapturedOutput;
+import org.springframework.boot.test.system.OutputCaptureExtension;
 import org.springframework.mock.web.MockFilterChain;
 import org.springframework.mock.web.MockHttpServletRequest;
 import org.springframework.mock.web.MockHttpServletResponse;
@@ -42,9 +45,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * Drives the connector against a stand-in for Identity that keeps only what Identity keeps: which keys are
- * waiting, which one is approved and which user tokens are valid.
+ * Drives the connector against a stand-in for Identity that keeps only what Identity keeps: which invitations
+ * nobody has used, which keys are waiting, which one is approved and which user tokens are valid.
  */
+@ExtendWith(OutputCaptureExtension.class)
 class VelodeIdentityTest {
 
     private static final String ORGANIZATION = "891602e0-f43a-41de-a768-281aeaf8b913";
@@ -53,7 +57,10 @@ class VelodeIdentityTest {
     private static final String FLOW_ID = "0f6d3c52-3b7e-4a51-9a59-6a2f1c3b8d10";
     private static final String FLOW_SECRET = "F".repeat(43);
     private static final String BROWSER = "198.51.100.7";
+    private static final String INVITATION = "I".repeat(43);
+    private static final String SECOND_INVITATION = "J".repeat(43);
 
+    private final Set<String> invitations = new HashSet<>(Set.of(INVITATION));
     private final Set<String> pendingKeys = new HashSet<>();
     private final List<String> requests = new ArrayList<>();
     private final MemoryStore store = new MemoryStore();
@@ -90,9 +97,10 @@ class VelodeIdentityTest {
         assertThat(velodeIdentity.loginUrl("state")).isEmpty();
         assertThat(velodeIdentity.verify("valid-token")).isEmpty();
         assertThat(pendingKeys).hasSize(1);
-        assertThat(requests.getFirst())
-            .contains("\"origin\":\"https://lista.velode.io\"", "\"name\":\"Lista \\\"beta\\\"\"");
+        assertThat(requests.getFirst()).contains("\"origin\":\"https://lista.velode.io\"",
+            "\"name\":\"Lista \\\"beta\\\"\"", "\"invitation\":\"" + INVITATION + "\"");
 
+        // The invitation is used by now; Identity knows the key and no longer looks at it.
         approve();
         connections.maintain();
 
@@ -274,6 +282,12 @@ class VelodeIdentityTest {
 
         connections.maintain();
         replica.maintain();
+        assertThat(pendingKeys).isEmpty();
+        // One replica started again with a new invitation is enough: the others ask with the key they share.
+        invitations.add(SECOND_INVITATION);
+        startedWith(SECOND_INVITATION).maintain();
+        connections.maintain();
+        replica.maintain();
         assertThat(pendingKeys).hasSize(1);
         approve();
         connections.maintain();
@@ -283,8 +297,9 @@ class VelodeIdentityTest {
         assertThat(pendingKeys).isEmpty();
     }
 
+    /** The invitation that connected the application was used then, so connecting again takes another. */
     @Test
-    void should_AskToConnectAgainWithNewKey_when_AdministratorDisconnects() {
+    void should_AskToConnectAgainWithNewKey_when_AdministratorDisconnects(CapturedOutput output) {
         connect();
         String disconnectedKey = approvedKey;
         approvedKey = null;
@@ -292,11 +307,48 @@ class VelodeIdentityTest {
         assertThat(velodeIdentity.verify("valid-token")).isEmpty();
         assertThat(velodeIdentity.isConnected()).isFalse();
         connections.maintain();
+        connections.maintain();
 
+        assertThat(pendingKeys).isEmpty();
+        assertThat(velodeIdentity.loginUrl("state")).isEmpty();
+        assertThat(output).doesNotContain(INVITATION).containsOnlyOnce(
+            "Velode Identity did not accept velode.identity.invitation: it was used, has expired or was created for"
+                + " another address than https://lista.velode.io. Create a new one in the organization's panel");
+
+        invitations.add(SECOND_INVITATION);
+        ConnectionManager restarted = startedWith(SECOND_INVITATION);
+        restarted.maintain();
         assertThat(pendingKeys).hasSize(1).doesNotContain(disconnectedKey);
         approve();
+        restarted.maintain();
+        assertThat(new VelodeIdentity(properties(), restarted, new IdentityClient(properties().apiUrl()))
+            .verify("valid-token")).isPresent();
+    }
+
+    /**
+     * Anyone could ask to connect and fill the list an administrator decides on, so Identity takes a request with
+     * a key it has not seen only with an invitation. Without one the application runs, unconnected, and says once
+     * what its operator has to do.
+     */
+    @Test
+    void should_StayUnconnectedAndSayWhatToDo_when_IdentityNeedsAnInvitation(CapturedOutput output) {
+        ConnectionManager uninvited = startedWith(null);
+        uninvited.maintain();
+        uninvited.maintain();
+
+        assertThat(uninvited.connected()).isEmpty();
+        assertThat(pendingKeys).isEmpty();
+        assertThat(requests.getFirst()).doesNotContain("invitation");
+        assertThat(output).containsOnlyOnce(
+            "Velode Identity needs an invitation to connect this application. Create one for https://lista.velode.io"
+                + " in the organization's panel and set velode.identity.invitation");
+
+        // Started again with the invitation, the application asks with the key it already stored.
         connections.maintain();
-        assertThat(velodeIdentity.verify("valid-token")).isPresent();
+        assertThat(pendingKeys).hasSize(1);
+        approve();
+        connections.maintain();
+        assertThat(velodeIdentity.isConnected()).isTrue();
     }
 
     @Test
@@ -732,7 +784,7 @@ class VelodeIdentityTest {
     }
 
     private VelodeIdentityProperties properties(Duration kept, int size) {
-        return new VelodeIdentityProperties(properties().url(), properties().appUrl(), null, null, kept, size);
+        return new VelodeIdentityProperties(properties().url(), properties().appUrl(), null, null, kept, size, INVITATION);
     }
 
     private synchronized long verifications() {
@@ -768,13 +820,23 @@ class VelodeIdentityTest {
     }
 
     private ConnectionManager manager() {
-        return new ConnectionManager(
-            properties(), "Lista \"beta\"", store, new IdentityClient(properties().apiUrl()), clock, new SecureRandom());
+        return startedWith(INVITATION);
+    }
+
+    /** A replica of the application started with the given invitation, or with none. */
+    private ConnectionManager startedWith(String invitation) {
+        return new ConnectionManager(properties(invitation), "Lista \"beta\"", store,
+            new IdentityClient(properties().apiUrl()), clock, new SecureRandom());
     }
 
     private VelodeIdentityProperties properties() {
+        return properties(INVITATION);
+    }
+
+    private VelodeIdentityProperties properties(String invitation) {
         return new VelodeIdentityProperties(
-            "http://localhost:" + identity.getAddress().getPort() + "/o/" + ORGANIZATION + "/", "https://lista.velode.io/", null, null, Duration.ZERO, null);
+            "http://localhost:" + identity.getAddress().getPort() + "/o/" + ORGANIZATION + "/", "https://lista.velode.io/", null, null, Duration.ZERO, null,
+            invitation);
     }
 
     private synchronized void answer(HttpExchange exchange) throws IOException {
@@ -786,7 +848,12 @@ class VelodeIdentityTest {
             verificationArrived.countDown();
             await(holdVerification);
         }
-        if ("/connection".equals(path)) {
+        // A key Identity has not seen is taken only with an invitation nobody has used; it does not say what was wrong.
+        if ("/connection".equals(path) && !key.equals(approvedKey) && !pendingKeys.contains(key)
+            && !invitations.remove(body.replaceAll(".*\"invitation\":\"([^\"]+)\".*", "$1"))) {
+            respond(exchange, 403, "{\"status\":403,\"error\":\"CONNECTION_INVITATION_REQUIRED\","
+                + "\"message\":\"A valid connection invitation is required\"}");
+        } else if ("/connection".equals(path)) {
             String status = key.equals(approvedKey) ? "CONNECTED" : "PENDING";
             if ("PENDING".equals(status)) {
                 pendingKeys.add(key);

@@ -6,6 +6,7 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Base64;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.Executors;
@@ -144,7 +145,8 @@ class ConnectionManager implements SmartLifecycle {
     private void requestConnection() {
         Connection current = connection;
         Response response = status(current.key());
-        String status = response.status() == 200 ? response.text("status") : "HTTP " + response.status();
+        String status = response.status() == 200 ? response.text("status")
+            : response.invitationRequired() ? "INVITATION_REQUIRED" : "HTTP " + response.status();
         if ("CONNECTED".equals(status)) {
             if (!save(current, new Connection(current.key(), null, response.text("appSlug"), clock.instant()))) {
                 return;
@@ -154,6 +156,14 @@ class ConnectionManager implements SmartLifecycle {
             if ("PENDING".equals(status)) {
                 LOGGER.info("Waiting for a Velode Identity administrator to approve this application. Code: {}",
                     response.text("code"));
+            } else if (response.invitationRequired() && properties.invitation() == null) {
+                LOGGER.warn("Velode Identity needs an invitation to connect this application. Create one for {} in"
+                    + " the organization's panel and set velode.identity.invitation", properties.appUrl());
+            } else if (response.invitationRequired()) {
+                // Identity does not say what was wrong with the invitation, so the operator is told every reason.
+                LOGGER.warn("Velode Identity did not accept velode.identity.invitation: it was used, has expired or"
+                    + " was created for another address than {}. Create a new one in the organization's panel",
+                    properties.appUrl());
             } else {
                 LOGGER.warn("Velode Identity did not accept the connection request ({})", status);
             }
@@ -162,7 +172,16 @@ class ConnectionManager implements SmartLifecycle {
     }
 
     private Response status(String key) {
-        return client.post("/connection", key, Map.of("origin", properties.appUrl(), "name", name, "key", key));
+        Map<String, String> request = new LinkedHashMap<>();
+        request.put("origin", properties.appUrl());
+        request.put("name", name);
+        request.put("key", key);
+        // Only Identity knows whether it has seen this key: it needs the invitation the first time and ignores it
+        // afterwards.
+        if (properties.invitation() != null) {
+            request.put("invitation", properties.invitation());
+        }
+        return client.post("/connection", key, request);
     }
 
     private void rotateKey() {
