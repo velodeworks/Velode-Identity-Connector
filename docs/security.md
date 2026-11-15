@@ -25,7 +25,8 @@ with the panel. The connector never logs the key, flow secrets or session tokens
 
 `velode.identity.url` and `velode.identity.app-url` must use `https`, or the application does not start.
 Plain `http` is accepted only for `localhost`, `127.0.0.1` and `[::1]` during development. The connector never follows
-redirects from Identity, so the key is only ever sent to the configured address.
+redirects from Identity, so the key is only ever sent to the configured address. It reads at most 64 KB of an
+answer, many times what Identity sends, and treats a longer one as Identity being out of reach.
 
 ## Browser Sessions
 
