@@ -452,14 +452,16 @@ class VelodeIdentityTest {
         assertThat(started.getStatus()).isEqualTo(200);
         assertThat(started.getHeader("X-Content-Type-Options")).isEqualTo("nosniff");
 
-        MockHttpServletRequest forgedLogout = new MockHttpServletRequest("GET", "/velode-identity/logout");
+        MockHttpServletRequest forgedLogout = new MockHttpServletRequest("POST", "/velode-identity/logout");
         forgedLogout.addHeader("Sec-Fetch-Site", "cross-site");
+        forgedLogout.addHeader("Origin", "https://evil.example");
         MockHttpServletResponse kept = send(filter, forgedLogout);
         assertThat(kept.getStatus()).isEqualTo(403);
         assertThat(kept.getCookie(VelodeIdentity.SESSION_COOKIE)).isNull();
 
-        MockHttpServletRequest logout = new MockHttpServletRequest("GET", "/velode-identity/logout");
+        MockHttpServletRequest logout = new MockHttpServletRequest("POST", "/velode-identity/logout");
         logout.addHeader("Sec-Fetch-Site", "same-origin");
+        logout.addHeader("Origin", "https://lista.velode.io");
         MockHttpServletResponse signedOut = send(filter, logout);
         assertThat(signedOut.getRedirectedUrl()).isEqualTo("/");
         assertThat(signedOut.getCookie(VelodeIdentity.SESSION_COOKIE).getMaxAge()).isZero();
@@ -493,6 +495,17 @@ class VelodeIdentityTest {
             .isEqualTo(LoginStep.LOGIN_FAILED);
         assertThat(velodeIdentity.startLogin("broken@velode.io", BROWSER, null).error())
             .isEqualTo(LoginStep.LOGIN_FAILED);
+    }
+
+    /** Identity's answers are small; a far longer one comes from something broken or hostile in front of it. */
+    @Test
+    void should_NotTakeTheAnswer_when_ItIsFarLongerThanIdentitySends() {
+        connect();
+
+        assertThatThrownBy(() -> velodeIdentity.verify("oversized-token"))
+            .isInstanceOf(IdentityUnavailableException.class)
+            .hasMessage("Velode Identity answered with more than 65536 bytes");
+        assertThat(velodeIdentity.verify("valid-token")).isPresent();
     }
 
     private MockHttpServletResponse flow(
@@ -857,6 +870,9 @@ class VelodeIdentityTest {
         } else if (body.contains("incomplete-")) {
             respond(exchange, 200,
                 "{\"success\":true,\"data\":{\"userId\":\"not-a-uuid\",\"sessionToken\":\"valid-token\"}}");
+        } else if (body.contains("oversized-")) {
+            respond(exchange, 200, "{\"success\":true,\"data\":{\"userId\":\"" + USER_ID + "\",\"email\":\""
+                + "a".repeat(70_000) + "@velode.io\"}}");
         } else if ("/connection/rotate".equals(path)) {
             approvedKey = body.replaceAll(".*\"newKey\":\"([^\"]+)\".*", "$1");
             respond(exchange, 204, "");

@@ -109,9 +109,20 @@ try again, rather than treating them as signed out.
 
 Test the sign-in link over HTTPS, then request `/me` in the same browser.
 The connector handles the callback and keeps the session in an `HttpOnly`, `Secure` cookie.
-Link to `/velode-identity/logout` to clear the app's cookie; the Identity session remains signed in.
-Sign-out started by another site is refused with `403`, so other sites cannot sign users out.
 Before approval, sign-in returns `503`.
+
+To sign out, post a form to `/velode-identity/logout`:
+
+```html
+<form method="post" action="/velode-identity/logout">
+    <button type="submit">Sign out</button>
+</form>
+```
+
+It clears the app's cookie; the Identity session remains signed in. A link to that address answers `405`, and a
+form posted by another site is refused with `403`, so other sites cannot sign users out. If the app keeps
+Spring Security's CSRF protection on, send its CSRF token with the form or exclude `/velode-identity/logout`;
+see the [security guide](security.md#what-the-application-must-do).
 
 For a custom email sign-in page, see [Your own sign-in page](advanced-usage.md#your-own-sign-in-page).
 Before going to production, review the [security guide](security.md) and its checklist.
