@@ -33,7 +33,7 @@ public class VelodeIdentityAutoConfiguration {
 
     @Bean
     IdentityClient velodeIdentityClient(VelodeIdentityProperties properties) {
-        return new IdentityClient(properties.apiUrl());
+        return new IdentityClient(properties.url());
     }
 
     @Bean

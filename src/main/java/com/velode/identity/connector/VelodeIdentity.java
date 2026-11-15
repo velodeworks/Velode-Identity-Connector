@@ -64,9 +64,12 @@ public class VelodeIdentity {
         return connections.connected().isPresent();
     }
 
-    /** Identity's sign-in page; it returns the user to this application's callback with a one-time code. */
+    /**
+     * Identity's sign-in page; it returns the user to this application's callback with a one-time code. Identity
+     * says where that page is the first time it is needed.
+     */
     public Optional<String> loginUrl(String state) {
-        return connections.connected().map(connection -> properties.url() + "/login"
+        return connections.connected().map(connection -> client.loginUrl()
             + "?appSlug=" + encode(connection.appSlug())
             + "&returnTo=" + encode(properties.appUrl() + CALLBACK_PATH)
             + "&state=" + encode(state));
