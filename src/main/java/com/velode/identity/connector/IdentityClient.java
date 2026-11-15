@@ -96,6 +96,11 @@ class IdentityClient {
             return status == 401 && "INVALID_CONNECTION_KEY".equals(text("error"));
         }
 
+        /** Identity has not seen the key and was not sent an invitation it accepts for this application. */
+        boolean invitationRequired() {
+            return status == 403 && "CONNECTION_INVITATION_REQUIRED".equals(text("error"));
+        }
+
         String text(String field) {
             Object value = data.get(field);
             return value == null ? null : value.toString();

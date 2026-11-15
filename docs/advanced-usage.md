@@ -11,7 +11,10 @@ Update Identity first, then update all connector replicas together after adaptin
 state. The stored format is unchanged.
 
 If an administrator disconnects the application, or its storage is lost, the connector asks to connect again and the
-panel shows the request as a reconnection of the same application.
+panel shows the request as a reconnection of the same application. Connecting again takes a new invitation: the
+application keeps running and answers `503` to sign-in, and its log says to create one and set
+`velode.identity.invitation`. With several replicas, one started with the new invitation is enough, because they
+share the key.
 
 ## Installing From GitHub Packages
 
@@ -41,6 +44,11 @@ Packages requires even for public packages. Keep it out of git.
 
 `velode.identity.name` overrides the name suggested to the administrator (default `spring.application.name`) and
 `velode.identity.key-rotation` how often the key is replaced (default `30d`).
+
+`velode.identity.invitation` is the one-use invitation an administrator creates in the Identity panel for the
+application's address, valid for one hour. The connector sends it while it asks for a connection, and Identity
+needs it only for a request it has not seen; a connected application does not use it, so it can be removed then.
+It must be the 43 characters the panel shows, or the application does not start. The connector never logs it.
 
 `velode.identity.verification-cache` is how long the connector trusts Identity's confirmation of a session before
 asking again (default `5s`, at most `1m`). An application checks its user on every request, and without this each

@@ -1,6 +1,7 @@
 package com.velode.identity.connector;
 
 import java.time.Duration;
+import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -18,7 +19,7 @@ class VelodeIdentityPropertiesTest {
 
     @Test
     void should_AcceptHttpsAddressesAndDeriveTheApiBase() {
-        VelodeIdentityProperties properties = new VelodeIdentityProperties(ORGANIZATION_URL + "/", APP_URL + "/", null, null, null, null);
+        VelodeIdentityProperties properties = new VelodeIdentityProperties(ORGANIZATION_URL + "/", APP_URL + "/", null, null, null, null, null);
 
         assertThat(properties.url()).isEqualTo(ORGANIZATION_URL);
         assertThat(properties.appUrl()).isEqualTo(APP_URL);
@@ -28,21 +29,21 @@ class VelodeIdentityPropertiesTest {
 
     @Test
     void should_TrustAConfirmationBriefly_when_NothingElseIsConfigured() {
-        assertThat(new VelodeIdentityProperties(ORGANIZATION_URL, APP_URL, null, null, null, null).verificationCache())
+        assertThat(new VelodeIdentityProperties(ORGANIZATION_URL, APP_URL, null, null, null, null, null).verificationCache())
             .isEqualTo(Duration.ofSeconds(5));
-        assertThat(new VelodeIdentityProperties(ORGANIZATION_URL, APP_URL, null, null, Duration.ZERO, null).verificationCache())
+        assertThat(new VelodeIdentityProperties(ORGANIZATION_URL, APP_URL, null, null, Duration.ZERO, null, null).verificationCache())
             .isZero();
-        assertThat(new VelodeIdentityProperties(ORGANIZATION_URL, APP_URL, null, null, Duration.ofMinutes(1), null)
+        assertThat(new VelodeIdentityProperties(ORGANIZATION_URL, APP_URL, null, null, Duration.ofMinutes(1), null, null)
             .verificationCache()).isEqualTo(Duration.ofMinutes(1));
     }
 
     @Test
     void should_RememberManySessions_when_NothingElseIsConfigured() {
-        assertThat(new VelodeIdentityProperties(ORGANIZATION_URL, APP_URL, null, null, null, null).verificationCacheSize())
+        assertThat(new VelodeIdentityProperties(ORGANIZATION_URL, APP_URL, null, null, null, null, null).verificationCacheSize())
             .isEqualTo(100_000);
-        assertThat(new VelodeIdentityProperties(ORGANIZATION_URL, APP_URL, null, null, null, 7).verificationCacheSize())
+        assertThat(new VelodeIdentityProperties(ORGANIZATION_URL, APP_URL, null, null, null, 7, null).verificationCacheSize())
             .isEqualTo(7);
-        assertThatThrownBy(() -> new VelodeIdentityProperties(ORGANIZATION_URL, APP_URL, null, null, null, 0))
+        assertThatThrownBy(() -> new VelodeIdentityProperties(ORGANIZATION_URL, APP_URL, null, null, null, 0, null))
             .isInstanceOf(IllegalStateException.class)
             .hasMessage("velode.identity.verification-cache-size must be at least 1");
     }
@@ -50,7 +51,7 @@ class VelodeIdentityPropertiesTest {
     @ParameterizedTest
     @ValueSource(strings = {"-PT1S", "PT1M1S", "PT1H"})
     void should_RefuseToStart_when_AConfirmationWouldBeTrustedForTooLong(String kept) {
-        assertThatThrownBy(() -> new VelodeIdentityProperties(ORGANIZATION_URL, APP_URL, null, null, Duration.parse(kept), null))
+        assertThatThrownBy(() -> new VelodeIdentityProperties(ORGANIZATION_URL, APP_URL, null, null, Duration.parse(kept), null, null))
             .isInstanceOf(IllegalStateException.class)
             .hasMessage("velode.identity.verification-cache must be between 0 and 60 seconds");
     }
@@ -58,7 +59,7 @@ class VelodeIdentityPropertiesTest {
     @ParameterizedTest
     @ValueSource(strings = {"http://localhost:8080", "http://127.0.0.1:8080", "http://[::1]:8080", "HTTP://LOCALHOST"})
     void should_AcceptPlainHttp_when_AddressIsThisMachine(String local) {
-        assertThat(new VelodeIdentityProperties(local + "/o/organization", local, null, null, null, null).appUrl()).isEqualTo(local);
+        assertThat(new VelodeIdentityProperties(local + "/o/organization", local, null, null, null, null, null).appUrl()).isEqualTo(local);
     }
 
     @ParameterizedTest
@@ -73,7 +74,7 @@ class VelodeIdentityPropertiesTest {
         "https://iam velode.io/o/organization"
     })
     void should_RefuseOrganizationAddress_when_ItIsNotSecureOrNotAnOrganization(String url) {
-        assertThatThrownBy(() -> new VelodeIdentityProperties(url, APP_URL, null, null, null, null))
+        assertThatThrownBy(() -> new VelodeIdentityProperties(url, APP_URL, null, null, null, null, null))
             .isInstanceOf(IllegalStateException.class)
             .hasMessageContaining("velode.identity.url");
     }
@@ -88,8 +89,36 @@ class VelodeIdentityPropertiesTest {
         " "
     })
     void should_RefuseApplicationAddress_when_ItIsNotAnHttpsOrigin(String appUrl) {
-        assertThatThrownBy(() -> new VelodeIdentityProperties(ORGANIZATION_URL, appUrl, null, null, null, null))
+        assertThatThrownBy(() -> new VelodeIdentityProperties(ORGANIZATION_URL, appUrl, null, null, null, null, null))
             .isInstanceOf(IllegalStateException.class)
             .hasMessageContaining("velode.identity.app-url");
+    }
+
+    /** An application that is already connected needs no invitation, so none is the ordinary case. */
+    @Test
+    void should_TakeTheInvitationAsIdentityIssuedIt_when_OneIsConfigured() {
+        String invitation = "aZ0_-".repeat(8) + "abc";
+
+        assertThat(withInvitation(invitation).invitation()).isEqualTo(invitation);
+        assertThat(withInvitation(" " + invitation + "\n").invitation()).isEqualTo(invitation);
+        assertThat(withInvitation(null).invitation()).isNull();
+        assertThat(withInvitation(" ").invitation()).isNull();
+        assertThat(withInvitation(invitation).toString()).doesNotContain(invitation);
+    }
+
+    /** A value cut short or mistyped is told apart at startup from one Identity would refuse an hour later. */
+    @Test
+    void should_RefuseToStart_when_InvitationIsNotOneIdentityIssues() {
+        for (String invitation : List.of("I".repeat(42), "I".repeat(44), "I".repeat(42) + "=", "I".repeat(42) + "+",
+            "I".repeat(42) + "/", "I".repeat(21) + " " + "I".repeat(21))) {
+            assertThatThrownBy(() -> withInvitation(invitation)).as(invitation)
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("velode.identity.invitation must be the invitation copied from the Identity panel: "
+                    + "43 letters, digits, hyphens or underscores");
+        }
+    }
+
+    private static VelodeIdentityProperties withInvitation(String invitation) {
+        return new VelodeIdentityProperties(ORGANIZATION_URL, APP_URL, null, null, null, null, invitation);
     }
 }

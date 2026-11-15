@@ -18,8 +18,20 @@ The connector holds one secret of its own: the **connection key** that authentic
 - An administrator who disconnects the application in Identity revokes the key at once; the connector then asks to be
   approved again with a new one.
 
+Asking for a connection takes a **connection invitation**, set as `velode.identity.invitation`, so that only an
+application an administrator expects can leave a request in the organization's panel.
+
+- An administrator creates it in the panel for the application's exact address. It works once and for one hour.
+- It is a secret only until it is used or expires. Keep it out of git, and remove it from the configuration once the
+  application is connected.
+- It authenticates nothing. The request it allows still waits for an administrator to compare the code and approve
+  it, and only then does the connection key work. Someone who obtains an unused invitation can leave one request
+  for that address, which the administrator can reject.
+- An application that is connected does not need one. Connecting again, after an administrator disconnects the
+  application or its stored connection is lost, takes a new one.
+
 The approval code shown in the application's log, such as `4F7-A92`, is not a secret: administrators compare it
-with the panel. The connector never logs the key, flow secrets or session tokens.
+with the panel. The connector never logs the key, the invitation, flow secrets or session tokens.
 
 ## Transport
 

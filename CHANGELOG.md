@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.6.0
+
+### Upgrade Notes
+
+- Connecting an application needs a connection invitation and this version. An administrator creates the invitation
+  for the application's address in the Identity panel, and the application sets it as `velode.identity.invitation`
+  before it starts. It works once and for one hour, and can be removed once the application is connected.
+- Applications that are already connected are unaffected and need no invitation; their keys are replaced as before.
+- Connecting again, after an administrator disconnects the application or its stored connection is lost, needs a
+  new invitation. Until it has one the application keeps running, answers `503` to sign-in and says in its log what
+  to do.
+
 ## 0.5.0
 
 ### Upgrade Notes
