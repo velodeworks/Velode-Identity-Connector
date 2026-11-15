@@ -443,6 +443,17 @@ class VelodeIdentityTest {
             .isEqualTo(LoginStep.LOGIN_FAILED);
     }
 
+    /** Identity's answers are small; a far longer one comes from something broken or hostile in front of it. */
+    @Test
+    void should_NotTakeTheAnswer_when_ItIsFarLongerThanIdentitySends() {
+        connect();
+
+        assertThatThrownBy(() -> velodeIdentity.verify("oversized-token"))
+            .isInstanceOf(IdentityUnavailableException.class)
+            .hasMessage("Velode Identity answered with more than 65536 bytes");
+        assertThat(velodeIdentity.verify("valid-token")).isPresent();
+    }
+
     private MockHttpServletResponse flow(
         VelodeIdentityFilter filter, String method, String step, String body, Cookie cookie
     ) throws Exception {
@@ -790,6 +801,9 @@ class VelodeIdentityTest {
         } else if (body.contains("incomplete-")) {
             respond(exchange, 200,
                 "{\"success\":true,\"data\":{\"userId\":\"not-a-uuid\",\"sessionToken\":\"valid-token\"}}");
+        } else if (body.contains("oversized-")) {
+            respond(exchange, 200, "{\"success\":true,\"data\":{\"userId\":\"" + USER_ID + "\",\"email\":\""
+                + "a".repeat(70_000) + "@velode.io\"}}");
         } else if ("/connection/rotate".equals(path)) {
             approvedKey = body.replaceAll(".*\"newKey\":\"([^\"]+)\".*", "$1");
             respond(exchange, 204, "");

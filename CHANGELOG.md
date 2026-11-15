@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.0
+
+### Security
+
+- The connector reads at most 64 KB of an answer from Identity, whose answers stay under 2 KB, so a faulty or
+  hostile proxy in front of Identity cannot make every application hold a large body in memory. A longer answer
+  throws `IdentityUnavailableException`, like an answer that never came.
+
 ## 0.5.0
 
 ### Upgrade Notes
