@@ -27,8 +27,8 @@ import org.springframework.boot.json.BasicJsonParser;
 import org.springframework.boot.json.JsonParseException;
 
 /**
- * Serves the application's sign-in, callback and sign-out addresses so it only has to link to them, and the JSON
- * steps of its own sign-in page.
+ * Serves the application's sign-in, callback and sign-out addresses so it only has to link to the first and post a
+ * form to the last, and the JSON steps of its own sign-in page.
  */
 class VelodeIdentityFilter extends HttpFilter {
 
@@ -100,7 +100,7 @@ class VelodeIdentityFilter extends HttpFilter {
             json(response, HttpServletResponse.SC_UNSUPPORTED_MEDIA_TYPE, Map.of("error", "JSON_REQUIRED"));
             return;
         }
-        if (post && !sameOrigin(request)) {
+        if (post && !sameOrigin(request, false)) {
             json(response, HttpServletResponse.SC_FORBIDDEN, Map.of("error", "CROSS_ORIGIN"));
             return;
         }
@@ -253,10 +253,18 @@ class VelodeIdentityFilter extends HttpFilter {
         response.sendRedirect(request.getContextPath() + localPath(decoded(expected[1])));
     }
 
-    /** Signing out is a link, but only this application may follow it; another site cannot sign its users out. */
+    /**
+     * Signing out is a form this application posts. Another site can make a browser follow a link with the session
+     * cookie, so a link signs nobody out, and a form must show that this application sent it.
+     */
     private void logout(HttpServletRequest request, HttpServletResponse response) throws IOException {
         response.setHeader("Cache-Control", "no-store");
-        if (!sameOrigin(request)) {
+        if (!"POST".equals(request.getMethod())) {
+            response.setHeader("Allow", "POST");
+            response.sendError(HttpServletResponse.SC_METHOD_NOT_ALLOWED, "Sign-out must be a POST");
+            return;
+        }
+        if (!sameOrigin(request, true)) {
             response.sendError(HttpServletResponse.SC_FORBIDDEN, "Sign-out must start in this application");
             return;
         }
@@ -273,12 +281,19 @@ class VelodeIdentityFilter extends HttpFilter {
     }
 
     /**
-     * Browsers say which site started a request. Clients that send neither header, such as older browsers, still meet
-     * the JSON-only bodies and SameSite cookies.
+     * Browsers say which site started a request, and a request that names another site is always refused. One that
+     * sends neither header is accepted for the JSON steps, whose body another site's form cannot send and which
+     * callers other than browsers also use. Signing out has no such body, so there it is refused: current browsers
+     * send at least one of the headers with a form this application posts.
+     *
+     * @param evidenceRequired refuse a request that does not say where it came from
      */
-    private boolean sameOrigin(HttpServletRequest request) {
+    private boolean sameOrigin(HttpServletRequest request, boolean evidenceRequired) {
         String site = request.getHeader("Sec-Fetch-Site");
         String origin = request.getHeader("Origin");
+        if (evidenceRequired && site == null && origin == null) {
+            return false;
+        }
         return (site == null || "same-origin".equals(site) || "none".equals(site))
             && (origin == null || appOrigin.equals(origin));
     }

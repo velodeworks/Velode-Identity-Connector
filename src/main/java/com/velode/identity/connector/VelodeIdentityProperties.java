@@ -5,10 +5,13 @@ import java.net.URISyntaxException;
 import java.time.Duration;
 import java.util.Locale;
 import java.util.Set;
+import java.util.regex.Pattern;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
 /**
- * The only settings a connected application provides; none of them is a secret.
+ * The only settings a connected application provides. None of them is a lasting secret: the invitation only gives
+ * the right to ask for a connection, once and within the hour it is valid, and can be removed from the
+ * configuration once the application is connected.
  *
  * @param url organization address copied from the Identity panel, such as {@code https://iam.velode.io/o/{organizationId}}
  * @param appUrl public HTTPS origin of this application
@@ -17,13 +20,18 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  * @param verificationCache how long what Identity said about a session is trusted before Identity is asked
  *     again; zero asks on every call
  * @param verificationCacheSize sessions remembered at once at most; beyond it, the rest are asked about every time
+ * @param invitation one-use invitation an administrator created in the Identity panel for this application's
+ *     address; only needed to ask for a new connection
  */
 @ConfigurationProperties(prefix = "velode.identity")
 public record VelodeIdentityProperties(
-    String url, String appUrl, String name, Duration keyRotation, Duration verificationCache, Integer verificationCacheSize
+    String url, String appUrl, String name, Duration keyRotation, Duration verificationCache, Integer verificationCacheSize,
+    String invitation
 ) {
 
     private static final String ORGANIZATION_SEGMENT = "/o/";
+    /** 32 random bytes as Identity writes them, in unpadded base64url. */
+    private static final Pattern INVITATION = Pattern.compile("[A-Za-z0-9_-]{43}");
     private static final Duration DEFAULT_VERIFICATION_CACHE = Duration.ofSeconds(5);
     /** About a hundred bytes each: room for every user at work on one replica of a large application. */
     private static final int DEFAULT_VERIFICATION_CACHE_SIZE = 100_000;
@@ -53,6 +61,17 @@ public record VelodeIdentityProperties(
             throw new IllegalStateException(
                 "velode.identity.app-url must be the public origin of this application, such as https://app.example.com");
         }
+        invitation = invitation == null || invitation.isBlank() ? null : invitation.trim();
+        if (invitation != null && !INVITATION.matcher(invitation).matches()) {
+            throw new IllegalStateException("velode.identity.invitation must be the invitation copied from the Identity"
+                + " panel: 43 letters, digits, hyphens or underscores");
+        }
+    }
+
+    /** The invitation is a secret until it is used or expires, so it stays out of anything that prints the settings. */
+    @Override
+    public String toString() {
+        return "VelodeIdentityProperties[url=" + url + ", appUrl=" + appUrl + "]";
     }
 
     /** Server-to-server base of the organization. */

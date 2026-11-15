@@ -43,8 +43,24 @@ since another replica may have replaced the key, and asks to be approved again i
 
 | Call | Body | Answer |
 | --- | --- | --- |
-| `/connection` | `origin`, `name`, `key` | `status`: `PENDING` with an approval `code`, or `CONNECTED` with `appSlug` |
+| `/connection` | `origin`, `name`, `key`, `invitation`? | `status`: `PENDING` with an approval `code`, or `CONNECTED` with `appSlug`; `403` when an invitation is needed |
 | `/connection/rotate` | `newKey` | `204` once the new key replaces the one in the header |
+
+`invitation` is 43 characters of unpadded base64url that an administrator creates in the panel for the application's
+exact origin. It works once and for one hour. Identity needs it with a key it has not seen and ignores it with one
+it knows, whatever was decided about that key; the connector cannot tell which is the case, so it sends the
+invitation it was configured with on every `/connection` call. A key Identity has not seen, sent without an
+invitation or with one that is wrong, expired, already used or created for another origin, answers `403` without
+saying which:
+
+```json
+{"status": 403, "error": "CONNECTION_INVITATION_REQUIRED", "message": "A valid connection invitation is required"}
+```
+
+The connector then keeps asking and tells the operator in its log to set a new invitation. Repeating a request keeps
+it waiting for approval, but for no more than 24 hours after it was made; after that, and after an administrator
+disconnects the application or its stored connection is lost, connecting takes a new invitation. An approved
+connection and `/connection/rotate` never need one.
 
 The connector calls `/connection` with a new key every ten seconds until an administrator approves it, and replaces the
 key with `/connection/rotate` when it is due. It stores the replacement before sending it, so a crash after Identity

@@ -7,7 +7,8 @@ Spring Boot starter that connects an application's backend to Velode Identity.
 The connector generates and renews its connection key; a global administrator approves the application in Identity.
 Identity authenticates users and controls application access; the application owns roles and permissions.
 
-- No credentials to copy or configure: set two addresses and approve the application in the Identity panel.
+- No lasting credentials to copy or configure: the connection key is made and kept by the connector. Set two
+  addresses and a one-use invitation from the Identity panel, valid for an hour, and approve the application there.
 - Sign-in through Identity's page, or on the application's own page with its own design.
 - Key rotation and reconnection shared safely between replicas.
 

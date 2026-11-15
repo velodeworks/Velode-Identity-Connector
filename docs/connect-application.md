@@ -9,7 +9,9 @@ A global administrator opens the organization's panel in Identity, confirms it i
 domain under **Settings > General > Application domains**. The organization needs working authentication and
 a user who can sign in. Global and organization sign-ins are separate.
 
-Open **Connect app** and copy the organization address for step 3.
+Open **Connect app** and copy the organization address for step 3. In the same panel, create a connection
+invitation for the application's address, such as `https://app.example.com`, and copy it too. The invitation is
+shown once, works once and is valid for one hour, so create it when the application is ready to start.
 
 ## 2. Add The Connector
 
@@ -19,7 +21,7 @@ The connector is published to Maven Central. Add it under `<dependencies>` in th
 <dependency>
     <groupId>com.velode</groupId>
     <artifactId>identity-spring-boot-starter</artifactId>
-    <version>0.5.0</version>
+    <version>0.6.0</version>
 </dependency>
 ```
 
@@ -29,14 +31,20 @@ even for public packages; see [installing from GitHub Packages](advanced-usage.m
 
 ## 3. Configure The Application
 
-Set these in the application's `application.properties`, using the address copied from Identity:
+Set these in the application's `application.properties`, using the address and the invitation copied from
+Identity:
 
 ```properties
 velode.identity.url=https://identity.example.com/o/ORGANIZATION_ID
 velode.identity.app-url=https://app.example.com
+velode.identity.invitation=INVITATION_FROM_THE_PANEL
 ```
 
-The app URL is an origin, without a path, on an allowed application domain.
+The app URL is an origin, without a path, on an allowed application domain, and the address the invitation was
+created for.
+The invitation only lets the application ask to connect, once. It is not the connection key, which the connector
+makes by itself, and it is no longer needed once the application is connected. Until then keep it out of git, for
+example by setting the environment variable `VELODE_IDENTITY_INVITATION` instead.
 Both addresses must use `https`, because the connection key and users' session tokens travel to them; the
 connector refuses to start otherwise. Plain `http` is accepted only for `localhost`, `127.0.0.1` and `[::1]`,
 for local development.
@@ -59,11 +67,18 @@ verified user returned in step 6 and the app's own authorization rules.
 
 ## 5. Start And Approve
 
-Start the application. Its log shows a waiting message with a code, such as `4F7-A92`.
-In the organization's **Connect app** panel, compare that code and the app's origin, then approve.
+Start the application while the invitation is valid. Its log shows a waiting message with a code, such as
+`4F7-A92`. In the organization's **Connect app** panel, compare that code and the app's origin, then approve.
+If the log says instead that Identity needs an invitation, or did not accept the one it was given, create a new
+one for the application's address, set it and start the application again.
 
 Choose **All users of the organization**, or **Only the people I choose** and add the intended users to the app's
 access list. The connector notices approval within ten seconds. No restart or manual connection key is needed.
+A request waits for approval while the application keeps running, for 24 hours at most; after that, asking again
+takes a new invitation.
+
+Once the log says the application is connected, remove `velode.identity.invitation`: it has been used, and a
+connected application does not need one.
 
 ## 6. Sign In And Read The User
 
@@ -94,9 +109,20 @@ try again, rather than treating them as signed out.
 
 Test the sign-in link over HTTPS, then request `/me` in the same browser.
 The connector handles the callback and keeps the session in an `HttpOnly`, `Secure` cookie.
-Link to `/velode-identity/logout` to clear the app's cookie; the Identity session remains signed in.
-Sign-out started by another site is refused with `403`, so other sites cannot sign users out.
 Before approval, sign-in returns `503`.
+
+To sign out, post a form to `/velode-identity/logout`:
+
+```html
+<form method="post" action="/velode-identity/logout">
+    <button type="submit">Sign out</button>
+</form>
+```
+
+It clears the app's cookie; the Identity session remains signed in. A link to that address answers `405`, and a
+form posted by another site is refused with `403`, so other sites cannot sign users out. If the app keeps
+Spring Security's CSRF protection on, send its CSRF token with the form or exclude `/velode-identity/logout`;
+see the [security guide](security.md#what-the-application-must-do).
 
 For a custom email sign-in page, see [Your own sign-in page](advanced-usage.md#your-own-sign-in-page).
 Before going to production, review the [security guide](security.md) and its checklist.

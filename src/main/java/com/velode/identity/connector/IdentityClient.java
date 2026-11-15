@@ -1,10 +1,12 @@
 package com.velode.identity.connector;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Map;
 import java.util.stream.Collectors;
@@ -18,6 +20,11 @@ class IdentityClient {
 
     private static final String KEY_HEADER = "X-Server-Connection-Key";
     private static final Duration TIMEOUT = Duration.ofSeconds(10);
+    /**
+     * Identity's answers stay under 2 KB. Something broken or hostile in front of it could send far more, and every
+     * application would hold it in memory, so the rest of a longer answer is not read.
+     */
+    private static final int MAX_RESPONSE_BYTES = 64 * 1024;
 
     private final String apiUrl;
     // A redirect could carry the connection key to another host, so Identity's answer is taken as it is.
@@ -40,8 +47,16 @@ class IdentityClient {
             request.header(KEY_HEADER, key);
         }
         try {
-            HttpResponse<String> response = http.send(request.build(), HttpResponse.BodyHandlers.ofString());
-            return new Response(response.statusCode(), data(response));
+            HttpResponse<InputStream> response = http.send(request.build(), HttpResponse.BodyHandlers.ofInputStream());
+            try (InputStream answer = response.body()) {
+                byte[] bytes = answer.readNBytes(MAX_RESPONSE_BYTES + 1);
+                if (bytes.length > MAX_RESPONSE_BYTES) {
+                    throw new IdentityUnavailableException(
+                        "Velode Identity answered with more than " + MAX_RESPONSE_BYTES + " bytes", null);
+                }
+                return new Response(response.statusCode(),
+                    data(response.statusCode(), new String(bytes, StandardCharsets.UTF_8)));
+            }
         } catch (IOException exception) {
             throw new IdentityUnavailableException("Velode Identity could not be reached", exception);
         } catch (InterruptedException exception) {
@@ -50,18 +65,18 @@ class IdentityClient {
         }
     }
 
-    private static Map<String, Object> data(HttpResponse<String> response) {
-        if (response.body().isBlank()) {
+    private static Map<String, Object> data(int status, String text) {
+        if (text.isBlank()) {
             return Map.of();
         }
         Map<String, Object> body;
         try {
-            body = new BasicJsonParser().parseMap(response.body());
+            body = new BasicJsonParser().parseMap(text);
         } catch (JsonParseException exception) {
             // A proxy in front of Identity answered; only the status is meaningful.
             return Map.of();
         }
-        return (response.statusCode() == 200 ? body.get("data") : body) instanceof Map<?, ?> data
+        return (status == 200 ? body.get("data") : body) instanceof Map<?, ?> data
             ? data.entrySet().stream()
                 .filter(entry -> entry.getValue() != null)
                 .collect(Collectors.toMap(entry -> String.valueOf(entry.getKey()), Map.Entry::getValue))
@@ -94,6 +109,11 @@ class IdentityClient {
         /** Identity refused the connection key itself, not the user token or code sent with it. */
         boolean keyRefused() {
             return status == 401 && "INVALID_CONNECTION_KEY".equals(text("error"));
+        }
+
+        /** Identity has not seen the key and was not sent an invitation it accepts for this application. */
+        boolean invitationRequired() {
+            return status == 403 && "CONNECTION_INVITATION_REQUIRED".equals(text("error"));
         }
 
         String text(String field) {

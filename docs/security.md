@@ -18,14 +18,27 @@ The connector holds one secret of its own: the **connection key** that authentic
 - An administrator who disconnects the application in Identity revokes the key at once; the connector then asks to be
   approved again with a new one.
 
+Asking for a connection takes a **connection invitation**, set as `velode.identity.invitation`, so that only an
+application an administrator expects can leave a request in the organization's panel.
+
+- An administrator creates it in the panel for the application's exact address. It works once and for one hour.
+- It is a secret only until it is used or expires. Keep it out of git, and remove it from the configuration once the
+  application is connected.
+- It authenticates nothing. The request it allows still waits for an administrator to compare the code and approve
+  it, and only then does the connection key work. Someone who obtains an unused invitation can leave one request
+  for that address, which the administrator can reject.
+- An application that is connected does not need one. Connecting again, after an administrator disconnects the
+  application or its stored connection is lost, takes a new one.
+
 The approval code shown in the application's log, such as `4F7-A92`, is not a secret: administrators compare it
-with the panel. The connector never logs the key, flow secrets or session tokens.
+with the panel. The connector never logs the key, the invitation, flow secrets or session tokens.
 
 ## Transport
 
 `velode.identity.url` and `velode.identity.app-url` must use `https`, or the application does not start.
 Plain `http` is accepted only for `localhost`, `127.0.0.1` and `[::1]` during development. The connector never follows
-redirects from Identity, so the key is only ever sent to the configured address.
+redirects from Identity, so the key is only ever sent to the configured address. It reads at most 64 KB of an
+answer, many times what Identity sends, and treats a longer one as Identity being out of reach.
 
 ## Browser Sessions
 
@@ -36,9 +49,11 @@ access is refused within that time; set it to `0` to ask on every call. What Ide
 memory, under a digest of the token and never the token itself, and only when Identity answered about the session:
 nothing is remembered when Identity is busy, failing or out of reach.
 
-Signing out at `/velode-identity/logout` clears the application's cookie and what the connector remembered about
-its session; the user's Identity session remains.
-Sign-out requests started by another site are refused.
+Signing out is a `POST` to `/velode-identity/logout`. It clears the application's cookie and what the connector
+remembered about its session; the user's Identity session remains.
+Any other method answers `405`, because another site can make a browser follow a link with the session cookie.
+A `POST` is refused with `403` when its `Origin` differs from `velode.identity.app-url`, when its `Sec-Fetch-Site`
+names another site, or when it carries neither header, so another site's form cannot sign a user out either.
 
 ## Sign-In Endpoints
 
@@ -70,7 +85,9 @@ Sign-out requests started by another site are refused.
   `currentUser` on every protected route and apply the application's own roles.
 - **Protect the application's own state-changing routes against CSRF.** `SameSite=Lax` stops most cross-site
   requests, but not those from sibling subdomains. With Spring Security, keep CSRF protection on for the application's
-  routes; exclude `/velode-identity/flow/**` or send the CSRF header with those requests.
+  routes; exclude `/velode-identity/flow/**` or send the CSRF header with those requests. Spring Security checks a
+  request before the connector sees it, so the sign-out form needs the same: send the CSRF token with it or exclude
+  `/velode-identity/logout`.
 - **Keep the connector current.** Only the latest minor version receives security fixes.
 
 ## Checklist
@@ -79,4 +96,5 @@ Sign-out requests started by another site are refused.
 - [ ] `server.forward-headers-strategy` matches the deployment, and only the proxy can reach the application.
 - [ ] `/velode-identity/**` is permitted; every other route checks the user and the application's permissions.
 - [ ] CSRF protection covers the application's own state-changing routes.
+- [ ] Sign-out is a form posted to `/velode-identity/logout`, with the CSRF token when CSRF protection is on.
 - [ ] The `velode_identity_connection` table and backups are restricted.
