@@ -30,6 +30,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 class VelodeIdentityFilterTest {
 
+    private static final String APP_ORIGIN = "https://lista.velode.io";
     private static final String LOGIN_URL = "https://iam.velode.io/o/organization/login?state=";
     private static final String STATE_COOKIE = "velode_identity_state";
     private static final String FLOW_COOKIE = "velode_identity_flow";
@@ -37,8 +38,7 @@ class VelodeIdentityFilterTest {
     private static final Duration SESSION_LIFETIME = Duration.ofHours(8);
 
     private final StubIdentity identity = new StubIdentity();
-    private final VelodeIdentityFilter filter =
-        new VelodeIdentityFilter(identity, "https://lista.velode.io", new SecureRandom());
+    private final VelodeIdentityFilter filter = new VelodeIdentityFilter(identity, APP_ORIGIN, new SecureRandom());
 
     @ParameterizedTest
     @CsvSource(nullValues = "NULL", value = {
@@ -153,7 +153,7 @@ class VelodeIdentityFilterTest {
         MockHttpServletResponse signedIn = signIn("/");
         Cookie session = signedIn.getCookie(VelodeIdentity.SESSION_COOKIE);
         MockHttpServletResponse started = send(new MockHttpServletRequest("GET", VelodeIdentityFilter.LOGIN_PATH));
-        MockHttpServletResponse signedOut = send(new MockHttpServletRequest("GET", VelodeIdentityFilter.LOGOUT_PATH));
+        MockHttpServletResponse signedOut = send(signOut());
 
         for (Cookie cookie : List.of(session, started.getCookie(STATE_COOKIE),
             signedOut.getCookie(VelodeIdentity.SESSION_COOKIE))) {
@@ -170,12 +170,35 @@ class VelodeIdentityFilterTest {
     /** Signing out takes effect at once, without waiting for the connector to ask Identity about the session again. */
     @Test
     void should_StopTrustingTheSession_when_UserSignsOut() throws Exception {
-        MockHttpServletRequest signOut = new MockHttpServletRequest("GET", VelodeIdentityFilter.LOGOUT_PATH);
+        MockHttpServletRequest signOut = signOut();
         signOut.setCookies(new Cookie("another", "value"), new Cookie(VelodeIdentity.SESSION_COOKIE, SESSION_TOKEN));
 
         send(signOut);
 
         assertThat(identity.forgotten).containsExactly(SESSION_TOKEN);
+    }
+
+    /**
+     * Another site can make a browser follow a link with the session cookie, and a browser without Fetch Metadata
+     * does not say that it did.
+     */
+    @Test
+    void should_KeepTheSession_when_SignOutIsALinkOrDoesNotSayWhereItCameFrom() throws Exception {
+        MockHttpServletRequest link = new MockHttpServletRequest("GET", VelodeIdentityFilter.LOGOUT_PATH);
+        link.setCookies(new Cookie(VelodeIdentity.SESSION_COOKIE, SESSION_TOKEN));
+        MockHttpServletResponse notAllowed = send(link);
+
+        assertThat(notAllowed.getStatus()).isEqualTo(405);
+        assertThat(notAllowed.getHeader("Allow")).isEqualTo("POST");
+        assertThat(notAllowed.getCookie(VelodeIdentity.SESSION_COOKIE)).isNull();
+
+        MockHttpServletRequest unexplained = new MockHttpServletRequest("POST", VelodeIdentityFilter.LOGOUT_PATH);
+        unexplained.setCookies(new Cookie(VelodeIdentity.SESSION_COOKIE, SESSION_TOKEN));
+        MockHttpServletResponse refused = send(unexplained);
+
+        assertThat(refused.getStatus()).isEqualTo(403);
+        assertThat(refused.getCookie(VelodeIdentity.SESSION_COOKIE)).isNull();
+        assertThat(identity.forgotten).isEmpty();
     }
 
     @ParameterizedTest
@@ -257,6 +280,13 @@ class VelodeIdentityFilterTest {
         login.setParameter("returnTo", returnTo);
         Cookie state = send(login).getCookie(STATE_COOKIE);
         return send(callback(state, stateOf(state), "valid-code"));
+    }
+
+    /** The sign-out form of the application's own page, as a browser posts it. */
+    private static MockHttpServletRequest signOut() {
+        MockHttpServletRequest signOut = new MockHttpServletRequest("POST", VelodeIdentityFilter.LOGOUT_PATH);
+        signOut.addHeader("Origin", APP_ORIGIN);
+        return signOut;
     }
 
     private static MockHttpServletRequest callback(Cookie state, String stateParameter, String code) {
