@@ -148,10 +148,11 @@ class IdentityClient {
             : Map.of();
     }
 
-    /** Every value the connector writes is plain text, so a flat object of escaped strings is enough. */
-    static String json(Map<String, String> body) {
+    /** A flat object: booleans as they are and every other value as escaped text, which is all the connector writes. */
+    static String json(Map<String, ?> body) {
         return body.entrySet().stream()
-            .map(entry -> '"' + entry.getKey() + "\":\"" + escape(entry.getValue()) + '"')
+            .map(entry -> '"' + entry.getKey() + "\":" + (entry.getValue() instanceof Boolean flag
+                ? flag.toString() : '"' + escape(String.valueOf(entry.getValue())) + '"'))
             .collect(Collectors.joining(",", "{", "}"));
     }
 

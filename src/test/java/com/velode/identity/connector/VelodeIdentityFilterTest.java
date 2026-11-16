@@ -34,6 +34,7 @@ class VelodeIdentityFilterTest {
     private static final String LOGIN_URL = "https://iam.velode.io/o/organization/login?state=";
     private static final String STATE_COOKIE = "velode_identity_state";
     private static final String FLOW_COOKIE = "velode_identity_flow";
+    private static final String SETUP_COOKIE = "velode_identity_authenticator_setup";
     private static final String SESSION_TOKEN = "session-token";
     private static final Duration SESSION_LIFETIME = Duration.ofHours(8);
 
@@ -255,6 +256,79 @@ class VelodeIdentityFilterTest {
         assertThat(refused.getCookie(FLOW_COOKIE)).isNull();
     }
 
+    /**
+     * Starting a setup keeps its id and key in an HttpOnly cookie and shows the page the QR code; confirming takes
+     * them from that cookie, sends the two codes and ends the cookie once Identity accepts them.
+     */
+    @Test
+    void should_KeepTheSetupInACookieAndConfirmItWithBothCodes() throws Exception {
+        MockHttpServletRequest start = accountRequest("POST", "authenticator/setup", "{}");
+
+        MockHttpServletResponse started = send(start);
+
+        assertThat(started.getStatus()).isEqualTo(200);
+        assertThat(started.getContentAsString()).contains("\"qrDataUri\":\"data:image/png;base64,AA==\"");
+        jakarta.servlet.http.Cookie setupCookie = started.getCookie(SETUP_COOKIE);
+        assertThat(setupCookie.getValue()).isEqualTo(StubIdentity.SETUP_ID + "." + StubIdentity.MANUAL_KEY);
+        assertThat(setupCookie.isHttpOnly()).isTrue();
+        assertThat(setupCookie.getSecure()).isTrue();
+
+        MockHttpServletRequest confirm = accountRequest("POST", "authenticator/confirm",
+            "{\"emailCode\":\"87654321\",\"code\":\"123456\"}");
+        confirm.setCookies(new jakarta.servlet.http.Cookie(VelodeIdentity.SESSION_COOKIE, SESSION_TOKEN), setupCookie);
+        MockHttpServletResponse confirmed = send(confirm);
+
+        assertThat(confirmed.getStatus()).isEqualTo(200);
+        assertThat(confirmed.getContentAsString()).isEqualTo("{\"authenticator\":true,\"securityKeys\":false}");
+        assertThat(confirmed.getCookie(SETUP_COOKIE).getMaxAge()).isZero();
+        assertThat(identity.confirmed).containsExactly(StubIdentity.SETUP_ID + " 87654321 123456");
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', value = {
+        "POST | second-factor         | application/json | {}  |                     | 405 | METHOD_NOT_ALLOWED",
+        "GET  | authenticator/setup   | application/json | {}  |                     | 405 | METHOD_NOT_ALLOWED",
+        "POST | authenticator/setup   | text/plain       | {}  |                     | 415 | JSON_REQUIRED",
+        "POST | authenticator/setup   | application/json | {}  | https://evil.example | 403 | CROSS_ORIGIN",
+        "POST | authenticator/confirm | application/json | {}  |                     | 400 | NO_SETUP",
+        "POST | authenticator/other   | application/json | {}  |                     | 404 | NOT_FOUND"
+    })
+    void should_RefuseAccountRequestsThatAreNotItsOwnJsonSteps(
+        String method, String step, String contentType, String body, String origin, int status, String error
+    ) throws Exception {
+        MockHttpServletRequest request = accountRequest(method, step, body);
+        request.setContentType(contentType);
+        if (origin != null) {
+            request.addHeader("Origin", origin);
+        }
+
+        MockHttpServletResponse refused = send(request);
+
+        assertThat(refused.getStatus()).isEqualTo(status);
+        assertThat(refused.getContentAsString()).isEqualTo("{\"error\":\"" + error + "\"}");
+        assertThat(identity.confirmed).isEmpty();
+    }
+
+    /** Identity's refusals keep their meaning for the page: a wrong code is the user's to fix, an ended session is not. */
+    @Test
+    void should_AnswerIdentitysRefusalsWithTheirStatus() throws Exception {
+        MockHttpServletRequest signedOut = new MockHttpServletRequest("GET", "/velode-identity/account/second-factor");
+        assertThat(send(signedOut).getStatus()).isEqualTo(401);
+
+        MockHttpServletRequest wrong = accountRequest("POST", "authenticator/disable", "{\"code\":\"000000\"}");
+        MockHttpServletResponse refused = send(wrong);
+        assertThat(refused.getStatus()).isEqualTo(400);
+        assertThat(refused.getContentAsString()).isEqualTo("{\"error\":\"INVALID_CODE\"}");
+    }
+
+    private static MockHttpServletRequest accountRequest(String method, String step, String body) {
+        MockHttpServletRequest request = new MockHttpServletRequest(method, "/velode-identity/account/" + step);
+        request.setContentType("application/json");
+        request.setContent(body.getBytes(StandardCharsets.UTF_8));
+        request.setCookies(new jakarta.servlet.http.Cookie(VelodeIdentity.SESSION_COOKIE, SESSION_TOKEN));
+        return request;
+    }
+
     @Test
     void should_RefuseBodiesLargerThanEightKilobytes() throws Exception {
         MockHttpServletRequest request = new MockHttpServletRequest("POST", "/velode-identity/flow/start");
@@ -341,6 +415,10 @@ class VelodeIdentityFilterTest {
      */
     private static final class StubIdentity extends VelodeIdentity {
 
+        static final UUID SETUP_ID = UUID.fromString("0b6f1e2d-3c4a-4b5c-8d9e-0f1a2b3c4d5e");
+        static final String MANUAL_KEY = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP";
+
+        private final List<String> confirmed = new ArrayList<>();
         private final List<String> exchanged = new ArrayList<>();
         private final List<String> forgotten = new ArrayList<>();
         private final List<String> signedOut = new ArrayList<>();
@@ -365,6 +443,39 @@ class VelodeIdentityFilterTest {
             }
             signedOut.add(token);
             return Optional.ofNullable(signOutUrl);
+        }
+
+        @Override
+        public AccountStep secondFactor(jakarta.servlet.http.HttpServletRequest request) {
+            return signedIn(request) ? new AccountStep(new SecondFactor(false, false), null, null)
+                : new AccountStep(null, null, AccountStep.SIGNED_OUT);
+        }
+
+        @Override
+        public AccountStep startAuthenticatorSetup(jakarta.servlet.http.HttpServletRequest request, String clientAddress) {
+            return new AccountStep(null, new AuthenticatorSetup(SETUP_ID, MANUAL_KEY, "otpauth://totp/Velode",
+                "data:image/png;base64,AA==", Instant.now().plus(Duration.ofMinutes(10))), null);
+        }
+
+        @Override
+        public AccountStep confirmAuthenticator(
+            jakarta.servlet.http.HttpServletRequest request, AuthenticatorSetup setup, String emailCode, String code
+        ) {
+            if (!MANUAL_KEY.equals(setup.manualKey())) {
+                return new AccountStep(null, null, "SETUP_EXPIRED");
+            }
+            confirmed.add(setup.id() + " " + emailCode + " " + code);
+            return new AccountStep(new SecondFactor(true, false), null, null);
+        }
+
+        @Override
+        public AccountStep disableAuthenticator(jakarta.servlet.http.HttpServletRequest request, String code, String clientAddress) {
+            return new AccountStep(null, null, "INVALID_CODE");
+        }
+
+        private static boolean signedIn(jakarta.servlet.http.HttpServletRequest request) {
+            return request.getCookies() != null && java.util.Arrays.stream(request.getCookies())
+                .anyMatch(cookie -> VelodeIdentity.SESSION_COOKIE.equals(cookie.getName()));
         }
 
         @Override
