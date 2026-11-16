@@ -1,5 +1,7 @@
 package com.velode.identity.connector;
 
+import com.velode.identity.connector.VelodeIdentity.AccountStep;
+import com.velode.identity.connector.VelodeIdentity.AuthenticatorSetup;
 import com.velode.identity.connector.VelodeIdentity.IdentitySession;
 import com.velode.identity.connector.VelodeIdentity.LoginFlow;
 import com.velode.identity.connector.VelodeIdentity.LoginOptions;
@@ -46,6 +48,11 @@ class VelodeIdentityFilter extends HttpFilter {
     private static final Set<String> FLOW_STEPS = Set.of("options", "start", "resend", "code", "totp");
     private static final String FLOW_COOKIE = "velode_identity_flow";
     private static final Duration FLOW_TTL = Duration.ofMinutes(20);
+    private static final String ACCOUNT_PATH = "/velode-identity/account/";
+    private static final String SECOND_FACTOR_STEP = "second-factor";
+    private static final Set<String> ACCOUNT_STEPS = Set.of(SECOND_FACTOR_STEP, "authenticator/setup",
+        "authenticator/resend", "authenticator/confirm", "authenticator/disable");
+    private static final String SETUP_COOKIE = "velode_identity_authenticator_setup";
     private static final int MAX_BODY_BYTES = 8192;
     private static final int LOCKED = 423;
     private static final int TOO_MANY_REQUESTS = 429;
@@ -71,6 +78,8 @@ class VelodeIdentityFilter extends HttpFilter {
             default -> {
                 if (path.startsWith(FLOW_PATH)) {
                     flow(path.substring(FLOW_PATH.length()), request, response);
+                } else if (path.startsWith(ACCOUNT_PATH)) {
+                    account(path.substring(ACCOUNT_PATH.length()), request, response);
                 } else {
                     chain.doFilter(request, response);
                 }
@@ -129,6 +138,115 @@ class VelodeIdentityFilter extends HttpFilter {
             respond(result, request, response);
         } catch (IdentityUnavailableException exception) {
             json(response, HttpServletResponse.SC_SERVICE_UNAVAILABLE, Map.of("error", "IDENTITY_UNAVAILABLE"));
+        }
+    }
+
+    /**
+     * JSON steps on the signed-in user's second factor, for the application's own settings page. The user is the one
+     * the session cookie names; a setup in progress stays in an HttpOnly cookie the page's scripts never read, so the
+     * page only shows its QR code and key. The same checks as the sign-in steps keep other sites out.
+     */
+    private void account(String step, HttpServletRequest request, HttpServletResponse response) throws IOException {
+        response.setHeader("Cache-Control", "no-store");
+        boolean post = "POST".equals(request.getMethod());
+        if (!ACCOUNT_STEPS.contains(step)) {
+            json(response, HttpServletResponse.SC_NOT_FOUND, Map.of("error", "NOT_FOUND"));
+            return;
+        }
+        // The second factors are read with GET; every change is a POST.
+        if (SECOND_FACTOR_STEP.equals(step) == post) {
+            json(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED, Map.of("error", "METHOD_NOT_ALLOWED"));
+            return;
+        }
+        if (post && (request.getContentType() == null
+            || !request.getContentType().toLowerCase(Locale.ROOT).startsWith("application/json"))) {
+            json(response, HttpServletResponse.SC_UNSUPPORTED_MEDIA_TYPE, Map.of("error", "JSON_REQUIRED"));
+            return;
+        }
+        if (post && !sameOrigin(request, false)) {
+            json(response, HttpServletResponse.SC_FORBIDDEN, Map.of("error", "CROSS_ORIGIN"));
+            return;
+        }
+        Map<String, Object> body = post ? body(request) : Map.of();
+        if (body == null) {
+            json(response, HttpServletResponse.SC_BAD_REQUEST, Map.of("error", "INVALID_REQUEST"));
+            return;
+        }
+        Optional<AuthenticatorSetup> setup = setupCookie(request);
+        if (("authenticator/resend".equals(step) || "authenticator/confirm".equals(step)) && setup.isEmpty()) {
+            json(response, HttpServletResponse.SC_BAD_REQUEST, Map.of("error", "NO_SETUP"));
+            return;
+        }
+        try {
+            String client = request.getRemoteAddr();
+            AccountStep result = switch (step) {
+                case SECOND_FACTOR_STEP -> identity.secondFactor(request);
+                case "authenticator/setup" -> identity.startAuthenticatorSetup(request, client);
+                case "authenticator/resend" -> identity.resendAuthenticatorCode(request, setup.get());
+                case "authenticator/confirm" -> identity.confirmAuthenticator(
+                    request, setup.get(), text(body, "emailCode"), text(body, "code"));
+                default -> identity.disableAuthenticator(request, text(body, "code"), client);
+            };
+            respond(step, result, request, response);
+        } catch (IdentityUnavailableException exception) {
+            json(response, HttpServletResponse.SC_SERVICE_UNAVAILABLE, Map.of("error", "IDENTITY_UNAVAILABLE"));
+        }
+    }
+
+    private void respond(String step, AccountStep result, HttpServletRequest request, HttpServletResponse response)
+        throws IOException {
+        if (result.failed()) {
+            if ("SETUP_EXPIRED".equals(result.error())) {
+                response.addCookie(cookie(SETUP_COOKIE, "", Duration.ZERO, request));
+            }
+            json(response, accountStatus(result.error()), Map.of("error", result.error()));
+            return;
+        }
+        if (result.setup() != null) {
+            AuthenticatorSetup setup = result.setup();
+            response.addCookie(cookie(SETUP_COOKIE, setup.id() + "." + setup.manualKey(),
+                Duration.between(Instant.now(), setup.expiresAt()), request));
+            Map<String, Object> fields = new LinkedHashMap<>();
+            fields.put("manualKey", setup.manualKey());
+            fields.put("otpauthUri", setup.otpauthUri());
+            fields.put("qrDataUri", setup.qrDataUri());
+            fields.put("expiresAt", setup.expiresAt().toString());
+            json(response, HttpServletResponse.SC_OK, fields);
+            return;
+        }
+        if ("authenticator/resend".equals(step)) {
+            json(response, HttpServletResponse.SC_OK, Map.of("sent", true));
+            return;
+        }
+        if ("authenticator/confirm".equals(step)) {
+            response.addCookie(cookie(SETUP_COOKIE, "", Duration.ZERO, request));
+        }
+        Map<String, Object> fields = new LinkedHashMap<>();
+        fields.put("authenticator", result.secondFactor().authenticator());
+        fields.put("securityKeys", result.secondFactor().securityKeys());
+        json(response, HttpServletResponse.SC_OK, fields);
+    }
+
+    private static int accountStatus(String error) {
+        return switch (error) {
+            case AccountStep.SIGNED_OUT, "INVALID_SESSION" -> HttpServletResponse.SC_UNAUTHORIZED;
+            case "INVALID_CODE", "INVALID_EMAIL_CODE", "VALIDATION_ERROR" -> HttpServletResponse.SC_BAD_REQUEST;
+            case "ALREADY_ENABLED", "NOT_ENABLED" -> HttpServletResponse.SC_CONFLICT;
+            case "SETUP_EXPIRED" -> HttpServletResponse.SC_GONE;
+            case "LOCKED" -> LOCKED;
+            case "RATE_LIMITED" -> TOO_MANY_REQUESTS;
+            default -> HttpServletResponse.SC_SERVICE_UNAVAILABLE;
+        };
+    }
+
+    private static Optional<AuthenticatorSetup> setupCookie(HttpServletRequest request) {
+        String[] parts = cookieValue(request, SETUP_COOKIE).split("\\.", 2);
+        try {
+            return parts.length == 2
+                ? Optional.of(new AuthenticatorSetup(UUID.fromString(parts[0]), parts[1], null, null, null))
+                : Optional.empty();
+        } catch (IllegalArgumentException exception) {
+            return Optional.empty();
         }
     }
 
@@ -204,7 +322,7 @@ class VelodeIdentityFilter extends HttpFilter {
         return body.get(field) instanceof String value ? value : null;
     }
 
-    private static void json(HttpServletResponse response, int status, Map<String, String> fields) throws IOException {
+    private static void json(HttpServletResponse response, int status, Map<String, ?> fields) throws IOException {
         response.setStatus(status);
         response.setHeader("X-Content-Type-Options", "nosniff");
         response.setContentType("application/json");

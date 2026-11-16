@@ -117,5 +117,20 @@ A session is `userId`, `email`, `sessionToken` and `expiresAt`, as in `/session/
 applies its limits. Error codes include `INVALID_CODE`, `TURNSTILE_REJECTED`, `VALIDATION_ERROR`, `ACCESS_DENIED`,
 `LOCKED` and `RATE_LIMITED`.
 
+## The User's Second Factor
+
+| Call | Body | Answer |
+| --- | --- | --- |
+| `/account/second-factor` | `token` | `authenticator`, `securityKeys` |
+| `/account/authenticator/setup` | `token`, `clientAddress` | `setupId`, `manualKey`, `otpauthUri`, `qrDataUri`, `expiresAt` |
+| `/account/authenticator/resend` | `token`, `setupId`, `manualKey` | `authenticator`, `securityKeys` |
+| `/account/authenticator/confirm` | `token`, `setupId`, `manualKey`, `emailCode`, `code` | `authenticator`, `securityKeys` |
+| `/account/authenticator/disable` | `token`, `code`, `clientAddress` | `authenticator`, `securityKeys` |
+
+`token` is the user's session in this application, checked as `/verify` checks it (`401 INVALID_SESSION`
+otherwise). Identity keeps only hashes of a setup's key and mailed code, so the connector keeps the key and sends it
+back. Error codes include `INVALID_EMAIL_CODE`, `INVALID_CODE`, `SETUP_EXPIRED`, `ALREADY_ENABLED`, `NOT_ENABLED`,
+`LOCKED`, `RATE_LIMITED` and `MAIL_UNAVAILABLE`.
+
 Before handing a `DONE` session to the application, the connector calls `/verify` with its token and accepts it only
 when Identity names the same user.

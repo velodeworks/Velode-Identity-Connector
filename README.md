@@ -10,6 +10,7 @@ Identity authenticates users and controls application access; the application ow
 - No lasting credentials to copy or configure: the connection key is made and kept by the connector. Set two
   addresses and a one-use invitation from the Identity panel, valid for an hour, and approve the application there.
 - Sign-in through Identity's page, or on the application's own page with its own design.
+- Two-step verification with an authenticator app, turned on and off from the application's own settings.
 - Key rotation and reconnection shared safely between replicas.
 
 Requires Java 21 and Spring Boot 3.5 or 4.x with a servlet stack.

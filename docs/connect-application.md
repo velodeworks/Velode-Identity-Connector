@@ -127,5 +127,7 @@ form posted by another site is refused with `403`, so other sites cannot sign us
 Spring Security's CSRF protection on, send its CSRF token with the form or exclude `/velode-identity/logout`;
 see the [security guide](security.md#what-the-application-must-do).
 
-For a custom email sign-in page, see [Your own sign-in page](advanced-usage.md#your-own-sign-in-page).
+For a custom email sign-in page, see [Your own sign-in page](advanced-usage.md#your-own-sign-in-page). To let users
+turn on an authenticator app from the application's settings, see
+[Two-step verification in your settings](advanced-usage.md#two-step-verification-in-your-settings).
 Before going to production, review the [security guide](security.md) and its checklist.

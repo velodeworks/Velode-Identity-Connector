@@ -114,3 +114,44 @@ browser's. Codes for these sign-ins name the application and have no magic link.
 redirect sign-in, and sign-ins on an application's own page are not shared with other applications.
 `VelodeIdentity` offers the same steps as `loginOptions`, `startLogin`, `resendLoginCode`, `submitLoginCode` and
 `submitAuthenticatorCode` for applications that keep the flow themselves.
+
+## Two-Step Verification In Your Settings
+
+An application can let its signed-in users turn an authenticator app (Google Authenticator, 1Password and the like)
+on and off from its own settings page, with its own design. Identity decides every step for the user the session
+cookie names; the page only shows what it is given and sends what the user types. Requires Identity with the
+`account` protocol, and the Organization needs a mail server: turning the authenticator on also needs a code Identity
+mails to the user, because an open session alone does not prove who is at the keyboard.
+
+| Request | Body | Success |
+| --- | --- | --- |
+| `GET /velode-identity/account/second-factor` | — | `{"authenticator": bool, "securityKeys": bool}` |
+| `POST /velode-identity/account/authenticator/setup` | `{}` | `{"manualKey", "otpauthUri", "qrDataUri", "expiresAt"}` |
+| `POST /velode-identity/account/authenticator/resend` | `{}` | `{"sent": true}` |
+| `POST /velode-identity/account/authenticator/confirm` | `{"emailCode", "code"}` | `{"authenticator": true, ...}` |
+| `POST /velode-identity/account/authenticator/disable` | `{"code"}` | `{"authenticator": false, ...}` |
+
+```js
+async function account(path, body) {
+  const response = await fetch(`/velode-identity/account/${path}`, body === undefined ? {} : {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body)
+  });
+  return response.json(); // the answer or {"error": ...}
+}
+const setup = await account("authenticator/setup", {});  // show <img src=setup.qrDataUri> and setup.manualKey
+await account("authenticator/confirm", { emailCode, code }); // the code from the email and one from the app
+```
+
+`setup` mails the user a code and answers the QR code, the key to type by hand and when the setup expires, which is
+as long as a sign-in code lasts. The setup itself stays in an `HttpOnly` cookie; starting again replaces it.
+`confirm` needs the mailed code and a code the authenticator shows, and five wrong attempts end the setup. `disable`
+needs a code the authenticator shows; wrong ones count towards the same lockout as wrong sign-in codes. Security keys
+sign only for Identity's own address, so `securityKeys` only says whether the user has any: link to Identity's account
+page for them. Requests follow the same rules as the sign-in steps: JSON, from the page's own origin, 8 KB at most.
+Failures answer `{"error": CODE}`: `SIGNED_OUT` or `INVALID_SESSION` (`401`), `INVALID_EMAIL_CODE` or `INVALID_CODE`
+(`400`: ask again), `SETUP_EXPIRED` (`410`: start again), `NO_SETUP` (`400`: start first), `ALREADY_ENABLED` or
+`NOT_ENABLED` (`409`), `LOCKED`, `RATE_LIMITED`, and `MAIL_UNAVAILABLE`, `NOT_CONNECTED` or `IDENTITY_UNAVAILABLE`
+(`503`). With Spring Security, exclude `/velode-identity/account/**` from CSRF or send the CSRF header, as for the
+sign-in steps. `VelodeIdentity` offers the same steps as `secondFactor`, `startAuthenticatorSetup`,
+`resendAuthenticatorCode`, `confirmAuthenticator` and `disableAuthenticator`, each taking the request that carries
+the session cookie.

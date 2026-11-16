@@ -58,6 +58,8 @@ class VelodeIdentityTest {
     private static final String FLOW_SECRET = "F".repeat(43);
     private static final String BROWSER = "198.51.100.7";
     private static final String INVITATION = "I".repeat(43);
+    private static final UUID SETUP_ID = UUID.fromString("0b6f1e2d-3c4a-4b5c-8d9e-0f1a2b3c4d5e");
+    private static final String MANUAL_KEY = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP";
     private static final String SECOND_INVITATION = "J".repeat(43);
 
     private final Set<String> invitations = new HashSet<>(Set.of(INVITATION));
@@ -126,6 +128,40 @@ class VelodeIdentityTest {
         assertThat(step.failed()).isFalse();
         assertThat(step.next()).isEqualTo(VelodeIdentity.LoginStep.Next.HOSTED_LOGIN);
         assertThat(step.session()).isNull();
+    }
+
+    /**
+     * The signed-in user's second factor is managed through Identity with the session the request carries; without
+     * one nothing is asked, and Identity's refusals reach the application as its error codes.
+     */
+    @Test
+    void should_ManageTheSignedInUsersAuthenticatorThroughIdentity() {
+        connections.maintain();
+        approve();
+        connections.maintain();
+        MockHttpServletRequest signedIn = new MockHttpServletRequest();
+        signedIn.setCookies(new jakarta.servlet.http.Cookie(VelodeIdentity.SESSION_COOKIE, "valid-token"));
+        int before = requests.size();
+
+        assertThat(velodeIdentity.secondFactor(new MockHttpServletRequest()).error())
+            .isEqualTo(VelodeIdentity.AccountStep.SIGNED_OUT);
+        assertThat(requests).hasSize(before);
+        assertThat(velodeIdentity.secondFactor(signedIn).secondFactor())
+            .isEqualTo(new VelodeIdentity.SecondFactor(false, true));
+
+        VelodeIdentity.AuthenticatorSetup setup = velodeIdentity.startAuthenticatorSetup(signedIn, BROWSER).setup();
+        assertThat(setup.id()).isEqualTo(SETUP_ID);
+        assertThat(setup.manualKey()).isEqualTo(MANUAL_KEY);
+        assertThat(setup.qrDataUri()).startsWith("data:image/png");
+        assertThat(setup.toString()).doesNotContain(MANUAL_KEY);
+
+        assertThat(velodeIdentity.confirmAuthenticator(signedIn, setup, "00000000", "123456").error())
+            .isEqualTo("INVALID_EMAIL_CODE");
+        assertThat(velodeIdentity.confirmAuthenticator(signedIn, setup, "87654321", "123456").secondFactor().authenticator())
+            .isTrue();
+        MockHttpServletRequest forged = new MockHttpServletRequest();
+        forged.setCookies(new jakarta.servlet.http.Cookie(VelodeIdentity.SESSION_COOKIE, "other-token"));
+        assertThat(velodeIdentity.secondFactor(forged).error()).isEqualTo("INVALID_SESSION");
     }
 
     /** A sign-out ends the session at Identity at once; where the browser goes next is believed only on Identity's host. */
@@ -935,6 +971,8 @@ class VelodeIdentityTest {
             respond(exchange, 503, "{\"status\":503,\"error\":\"VERIFICATION_BUSY\",\"message\":\"Try again\"}");
         } else if (path.startsWith("/login-flow/")) {
             loginFlow(exchange, path.substring("/login-flow/".length()), body);
+        } else if (path.startsWith("/account/")) {
+            account(exchange, path.substring("/account/".length()), body);
         } else if (body.contains("incomplete-")) {
             respond(exchange, 200,
                 "{\"success\":true,\"data\":{\"userId\":\"not-a-uuid\",\"sessionToken\":\"valid-token\"}}");
@@ -958,6 +996,33 @@ class VelodeIdentityTest {
                 + "\"appSlug\":\"lista\",\"sessionToken\":\"valid-token\",\"expiresAt\":\"" + NOW.plus(Duration.ofDays(1)) + "\"}}");
         } else {
             respond(exchange, 401, "{\"status\":401,\"error\":\"UNAUTHORIZED\",\"message\":\"Invalid or expired token\"}");
+        }
+    }
+
+    /**
+     * Identity answers for the user of {@code valid-token} only; a setup is confirmed with its own id and key, the
+     * mailed code 87654321 and the authenticator code 123456.
+     */
+    private void account(HttpExchange exchange, String step, String body) throws IOException {
+        if (!body.contains("\"token\":\"valid-token\"")) {
+            respond(exchange, 401, "{\"status\":401,\"error\":\"INVALID_SESSION\",\"message\":\"The session is not valid\"}");
+            return;
+        }
+        switch (step) {
+            case "second-factor" -> respond(exchange, 200,
+                "{\"success\":true,\"data\":{\"authenticator\":false,\"securityKeys\":true}}");
+            case "authenticator/setup" -> respond(exchange, 200, "{\"success\":true,\"data\":{\"setupId\":\"" + SETUP_ID
+                + "\",\"manualKey\":\"" + MANUAL_KEY + "\",\"otpauthUri\":\"otpauth://totp/Velode\","
+                + "\"qrDataUri\":\"data:image/png;base64,AA==\",\"expiresAt\":\"" + NOW.plus(Duration.ofMinutes(10)) + "\"}}");
+            case "authenticator/confirm" -> {
+                if (body.contains("\"setupId\":\"" + SETUP_ID + "\",\"manualKey\":\"" + MANUAL_KEY + "\"")
+                    && body.contains("\"emailCode\":\"87654321\"") && body.contains("\"code\":\"123456\"")) {
+                    respond(exchange, 200, "{\"success\":true,\"data\":{\"authenticator\":true,\"securityKeys\":true}}");
+                } else {
+                    respond(exchange, 400, "{\"status\":400,\"error\":\"INVALID_EMAIL_CODE\",\"message\":\"Not valid\"}");
+                }
+            }
+            default -> respond(exchange, 404, "");
         }
     }
 
