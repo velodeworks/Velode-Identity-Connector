@@ -176,6 +176,8 @@ class ConnectionManager implements SmartLifecycle {
         request.put("origin", properties.appUrl());
         request.put("name", name);
         request.put("key", key);
+        // Identity returns a sign-in to this exact path of the application's address and to no other.
+        request.put("callbackPath", VelodeIdentity.CALLBACK_PATH);
         // Only Identity knows whether it has seen this key: it needs the invitation the first time and ignores it
         // afterwards.
         if (properties.invitation() != null) {

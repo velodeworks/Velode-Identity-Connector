@@ -8,6 +8,13 @@
   organization address it is given, the first time it needs it; `velode.identity.url` stays as it is. Against an
   older Identity sign-in answers `503`.
 
+### Security
+
+- Identity returns a sign-in only to the application's callback, `/velode-identity/callback` on its address, and
+  no longer to any page of that address. The connector declares it when it asks to connect, and the
+  administrator sees it before approving. An application connected with an earlier version has it typed once
+  in its panel in Identity; until then its sign-in link answers `400`.
+
 ### Changed
 
 - The connector no longer deduces Identity's sign-in page and API from the organization address: Identity tells

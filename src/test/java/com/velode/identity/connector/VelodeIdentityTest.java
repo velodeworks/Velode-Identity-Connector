@@ -121,7 +121,8 @@ class VelodeIdentityTest {
         assertThat(velodeIdentity.verify("valid-token")).isEmpty();
         assertThat(pendingKeys).hasSize(1);
         assertThat(requests.getFirst()).contains("\"origin\":\"https://lista.velode.io\"",
-            "\"name\":\"Lista \\\"beta\\\"\"", "\"invitation\":\"" + INVITATION + "\"");
+            "\"name\":\"Lista \\\"beta\\\"\"", "\"invitation\":\"" + INVITATION + "\"",
+            "\"callbackPath\":\"/velode-identity/callback\"");
 
         // The invitation is used by now; Identity knows the key and no longer looks at it.
         approve();
