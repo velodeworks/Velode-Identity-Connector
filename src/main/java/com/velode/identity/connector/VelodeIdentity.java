@@ -206,13 +206,84 @@ public class VelodeIdentity {
 
     /** The user signed in through the connector's web endpoints, as {@link #verify(String)} confirms them. */
     public Optional<IdentityUser> currentUser(HttpServletRequest request) {
+        return sessionToken(request).flatMap(this::verify);
+    }
+
+    /** The second factors of the user signed in through the connector's web endpoints. */
+    public AccountStep secondFactor(HttpServletRequest request) {
+        return accountStep("/account/second-factor", request, fields());
+    }
+
+    /**
+     * Starts setting up an authenticator app for the signed-in user. Identity mails the user a code that
+     * {@link #confirmAuthenticator} needs with a code of the new authenticator; keep the setup server-side, such as
+     * in an HttpOnly cookie, and show its QR code or key.
+     *
+     * @param clientAddress IP address of the browser this request serves
+     */
+    public AccountStep startAuthenticatorSetup(HttpServletRequest request, String clientAddress) {
+        return accountStep("/account/authenticator/setup", request, fields("clientAddress", clientAddress));
+    }
+
+    /** Mails a fresh confirmation code for a started setup; Identity applies a sign-in code's resend limits. */
+    public AccountStep resendAuthenticatorCode(HttpServletRequest request, AuthenticatorSetup setup) {
+        return accountStep("/account/authenticator/resend", request, setupFields(setup));
+    }
+
+    /** Turns the authenticator on with the mailed code and a code the new authenticator shows. */
+    public AccountStep confirmAuthenticator(
+        HttpServletRequest request, AuthenticatorSetup setup, String emailCode, String code
+    ) {
+        Map<String, String> fields = setupFields(setup);
+        fields.putAll(fields("emailCode", emailCode, "code", code));
+        return accountStep("/account/authenticator/confirm", request, fields);
+    }
+
+    /** Turns the authenticator off with a code it shows; wrong codes count towards the sign-in lockouts. */
+    public AccountStep disableAuthenticator(HttpServletRequest request, String code, String clientAddress) {
+        return accountStep("/account/authenticator/disable", request, fields("code", code, "clientAddress", clientAddress));
+    }
+
+    private AccountStep accountStep(String path, HttpServletRequest request, Map<String, String> fields) {
+        Optional<String> token = sessionToken(request);
+        if (token.isEmpty()) {
+            return AccountStep.failed(AccountStep.SIGNED_OUT);
+        }
+        fields.put("token", token.get());
+        Optional<Response> sent = send(path, fields);
+        if (sent.isEmpty()) {
+            return AccountStep.failed(LoginStep.NOT_CONNECTED);
+        }
+        Response response = sent.get();
+        if (response.status() != 200) {
+            return AccountStep.failed(response.text("error") == null ? AccountStep.ACCOUNT_FAILED : response.text("error"));
+        }
+        if (response.text("setupId") == null) {
+            return new AccountStep(new SecondFactor(
+                Boolean.parseBoolean(response.text("authenticator")),
+                Boolean.parseBoolean(response.text("securityKeys"))), null, null);
+        }
+        try {
+            return new AccountStep(null, new AuthenticatorSetup(
+                UUID.fromString(response.text("setupId")), response.text("manualKey"), response.text("otpauthUri"),
+                response.text("qrDataUri"), Instant.parse(response.text("expiresAt"))), null);
+        } catch (IllegalArgumentException | NullPointerException | DateTimeParseException exception) {
+            return AccountStep.failed(AccountStep.ACCOUNT_FAILED);
+        }
+    }
+
+    private static Map<String, String> setupFields(AuthenticatorSetup setup) {
+        return setup == null ? fields() : fields("setupId", setup.id().toString(), "manualKey", setup.manualKey());
+    }
+
+    private static Optional<String> sessionToken(HttpServletRequest request) {
         Cookie[] cookies = request.getCookies();
         if (cookies == null) {
             return Optional.empty();
         }
         for (Cookie cookie : cookies) {
-            if (SESSION_COOKIE.equals(cookie.getName())) {
-                return verify(cookie.getValue());
+            if (SESSION_COOKIE.equals(cookie.getName()) && !cookie.getValue().isBlank()) {
+                return Optional.of(cookie.getValue());
             }
         }
         return Optional.empty();
@@ -428,6 +499,52 @@ public class VelodeIdentity {
              * security key does. Send the browser to {@code /velode-identity/login}.
              */
             HOSTED_LOGIN
+        }
+    }
+
+    /**
+     * The second factors of a user.
+     *
+     * @param authenticator whether the user signs in with an authenticator app code
+     * @param securityKeys whether the user has security keys, which they manage on Identity's own pages
+     */
+    public record SecondFactor(boolean authenticator, boolean securityKeys) {
+    }
+
+    /**
+     * An authenticator app being set up. Show the QR code, or the key to type, and keep the id and key server-side:
+     * the next steps need both.
+     */
+    public record AuthenticatorSetup(UUID id, String manualKey, String otpauthUri, String qrDataUri, Instant expiresAt) {
+
+        @Override
+        public String toString() {
+            return "AuthenticatorSetup[id=" + id + ", expiresAt=" + expiresAt + "]";
+        }
+    }
+
+    /**
+     * What Identity decided for one step on the signed-in user's second factor.
+     *
+     * @param secondFactor the user's second factors after the step, unless it started a setup or failed
+     * @param setup the setup a start began
+     * @param error Identity's error code, such as {@code INVALID_CODE}, {@code INVALID_EMAIL_CODE},
+     *     {@code SETUP_EXPIRED}, {@code LOCKED} or {@code MAIL_UNAVAILABLE}, or one of the constants here
+     */
+    public record AccountStep(SecondFactor secondFactor, AuthenticatorSetup setup, String error) {
+
+        /** The request carries no session of this application: the user is not signed in. */
+        public static final String SIGNED_OUT = "SIGNED_OUT";
+
+        /** Identity gave no usable answer. */
+        public static final String ACCOUNT_FAILED = "ACCOUNT_FAILED";
+
+        static AccountStep failed(String error) {
+            return new AccountStep(null, null, error);
+        }
+
+        public boolean failed() {
+            return error != null;
         }
     }
 

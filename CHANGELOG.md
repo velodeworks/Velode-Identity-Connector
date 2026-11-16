@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.8.0
+
+### Upgrade Notes
+
+- The new steps on the user's second factor need an Identity with the `account` protocol; against an older one they
+  answer `503`. Nothing else changes for an application that does not use them.
+
+### Added
+
+- An application can let its signed-in users turn an authenticator app on and off from its own settings:
+  `/velode-identity/account/second-factor` and `/velode-identity/account/authenticator/{setup,resend,confirm,disable}`,
+  and the same steps on `VelodeIdentity`. Turning it on needs a code Identity mails to the user and a code of the new
+  authenticator; turning it off needs a code of the authenticator. With Spring Security, treat
+  `/velode-identity/account/**` like `/velode-identity/flow/**` for CSRF.
+
 ## 0.7.0
 
 ### Upgrade Notes

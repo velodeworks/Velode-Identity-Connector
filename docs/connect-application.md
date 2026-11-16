@@ -21,7 +21,7 @@ The connector is published to Maven Central. Add it under `<dependencies>` in th
 <dependency>
     <groupId>com.velode</groupId>
     <artifactId>identity-spring-boot-starter</artifactId>
-    <version>0.7.0</version>
+    <version>0.8.0</version>
 </dependency>
 ```
 
@@ -127,5 +127,7 @@ form posted by another site is refused with `403`, so other sites cannot sign us
 Spring Security's CSRF protection on, send its CSRF token with the form or exclude `/velode-identity/logout`;
 see the [security guide](security.md#what-the-application-must-do).
 
-For a custom email sign-in page, see [Your own sign-in page](advanced-usage.md#your-own-sign-in-page).
+For a custom email sign-in page, see [Your own sign-in page](advanced-usage.md#your-own-sign-in-page). To let users
+turn on an authenticator app from the application's settings, see
+[Two-step verification in your settings](advanced-usage.md#two-step-verification-in-your-settings).
 Before going to production, review the [security guide](security.md) and its checklist.
