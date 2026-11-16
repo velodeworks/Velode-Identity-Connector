@@ -66,6 +66,7 @@ class VelodeIdentityTest {
     private final MemoryStore store = new MemoryStore();
     private final java.util.concurrent.atomic.AtomicInteger discoveries = new java.util.concurrent.atomic.AtomicInteger();
     private volatile String toldAddresses;
+    private volatile String signOutUrl;
     private volatile String approvedKey;
     private volatile boolean sessionEnded;
     private volatile boolean identityBusy;
@@ -110,6 +111,40 @@ class VelodeIdentityTest {
         assertThatThrownBy(misled::loginUrl).isInstanceOf(IdentityUnavailableException.class);
         assertThatThrownBy(() -> misled.post("/verify", "key", java.util.Map.of("token", "valid-token")))
             .isInstanceOf(IdentityUnavailableException.class);
+    }
+
+    /** An account whose only second factor is a security key finishes on Identity's own page. */
+    @Test
+    void should_SendTheUserToIdentitysPage_when_TheAccountFinishesSigningInThere() {
+        connections.maintain();
+        approve();
+        connections.maintain();
+        VelodeIdentity.LoginFlow flow = velodeIdentity.startLogin("user@velode.io", BROWSER, null).flow();
+
+        VelodeIdentity.LoginStep step = velodeIdentity.submitLoginCode(flow, "55555555", BROWSER);
+
+        assertThat(step.failed()).isFalse();
+        assertThat(step.next()).isEqualTo(VelodeIdentity.LoginStep.Next.HOSTED_LOGIN);
+        assertThat(step.session()).isNull();
+    }
+
+    /** A sign-out ends the session at Identity at once; where the browser goes next is believed only on Identity's host. */
+    @Test
+    void should_EndTheSessionAtIdentityAndSayWhereTheBrowserGoes_when_UserSignsOut() {
+        connections.maintain();
+        approve();
+        connections.maintain();
+        signOutUrl = "http://localhost:" + identity.getAddress().getPort() + "/o/" + ORGANIZATION + "/logout/return?ticket=t";
+        assertThat(velodeIdentity.verify("valid-token")).isPresent();
+
+        assertThat(velodeIdentity.signOut("valid-token")).contains(signOutUrl);
+        assertThat(velodeIdentity.verify("valid-token")).isEmpty();
+        // Nothing left to end: the browser stays in the application.
+        assertThat(velodeIdentity.signOut("valid-token")).isEmpty();
+
+        sessionEnded = false;
+        signOutUrl = "https://elsewhere.example/logout/return?ticket=t";
+        assertThat(velodeIdentity.signOut("valid-token")).isEmpty();
     }
 
     @Test
@@ -906,6 +941,14 @@ class VelodeIdentityTest {
         } else if (body.contains("oversized-")) {
             respond(exchange, 200, "{\"success\":true,\"data\":{\"userId\":\"" + USER_ID + "\",\"email\":\""
                 + "a".repeat(70_000) + "@velode.io\"}}");
+        } else if ("/session/revoke".equals(path)) {
+            // Identity ends the session and, when the browser is signed in to it, says where to end that too.
+            if (body.contains("valid-token") && !sessionEnded) {
+                sessionEnded = true;
+                respond(exchange, 200, "{\"success\":true,\"data\":{\"signOutUrl\":\"" + signOutUrl + "\"}}");
+            } else {
+                respond(exchange, 204, "");
+            }
         } else if ("/connection/rotate".equals(path)) {
             approvedKey = body.replaceAll(".*\"newKey\":\"([^\"]+)\".*", "$1");
             respond(exchange, 204, "");
@@ -933,6 +976,8 @@ class VelodeIdentityTest {
             case "email-code" -> {
                 if (ownFlow && body.contains("\"code\":\"22222222\"")) {
                     respond(exchange, 200, "{\"success\":true,\"data\":{\"next\":\"TOTP\"}}");
+                } else if (ownFlow && body.contains("\"code\":\"55555555\"")) {
+                    respond(exchange, 200, "{\"success\":true,\"data\":{\"next\":\"HOSTED_LOGIN\"}}");
                 } else if (ownFlow && body.contains("\"code\":\"44444444\"")) {
                     respond(exchange, 200, "{\"success\":true,\"data\":{\"next\":\"DONE\",\"userId\":\"" + USER_ID
                         + "\",\"sessionToken\":\"valid-token\"}}");

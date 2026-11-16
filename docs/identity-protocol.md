@@ -6,12 +6,27 @@ sends.
 
 ## Addresses
 
-The organization address from the Identity panel, `https://identity.example.com/o/{organizationId}`, gives two bases:
+The connector is given one address, the organization address from the Identity panel,
+`https://identity.example.com/o/{organizationId}`, and asks Identity for the rest once, the first time it needs
+it, without a key:
 
-| Base | Used by |
+```http
+GET https://identity.example.com/o/{organizationId}/.well-known/velode-identity
+```
+
+```json
+{"success": true, "data": {"organizationId": "…", "loginUrl": "https://identity.example.com/o/…/login",
+  "apiUrl": "https://identity.example.com/api/organizations/…"}}
+```
+
+| Address | Used by |
 | --- | --- |
-| `https://identity.example.com/o/{organizationId}` | The browser, for the sign-in page |
-| `https://identity.example.com/api/organizations/{organizationId}` | The connector, for every call below |
+| `loginUrl` | The browser, for the sign-in page |
+| `apiUrl` | The connector, as the base of every call below |
+
+The connector deduces neither. It believes them only when both are on the host of the address it was given and
+the document names the same organization, since the connection key and session tokens travel there; otherwise
+sign-in answers `503`.
 
 ## Requests And Answers
 
@@ -43,8 +58,11 @@ since another replica may have replaced the key, and asks to be approved again i
 
 | Call | Body | Answer |
 | --- | --- | --- |
-| `/connection` | `origin`, `name`, `key`, `invitation`? | `status`: `PENDING` with an approval `code`, or `CONNECTED` with `appSlug`; `403` when an invitation is needed |
+| `/connection` | `origin`, `name`, `key`, `callbackPath`, `invitation`? | `status`: `PENDING` with an approval `code`, or `CONNECTED` with `appSlug`; `403` when an invitation is needed |
 | `/connection/rotate` | `newKey` | `204` once the new key replaces the one in the header |
+
+`callbackPath` is `/velode-identity/callback`, the path of the application's origin Identity returns a sign-in to;
+the administrator sees it before approving and Identity returns a sign-in to no other address.
 
 `invitation` is 43 characters of unpadded base64url that an administrator creates in the panel for the application's
 exact origin. It works once and for one hour. Identity needs it with a key it has not seen and ignores it with one
@@ -69,7 +87,8 @@ accepts it does not lose the connection.
 ## Redirect Sign-In
 
 1. The connector sends the browser to
-   `{organization address}/login?appSlug={appSlug}&returnTo={app-url}/velode-identity/callback&state={state}`.
+   `{loginUrl}?appSlug={appSlug}&returnTo={app-url}/velode-identity/callback&state={state}`. `returnTo` must be the
+   application's callback exactly; anything else answers `400` before the user signs in.
 2. Identity signs the user in and returns to the callback with `velode_identity_code` and `velode_identity_state`.
 3. The connector checks the state and trades the code:
 
@@ -77,6 +96,11 @@ accepts it does not lose the connection.
 | --- | --- | --- |
 | `/session/exchange` | `code` | `userId`, `email`, `sessionToken`, `expiresAt` (ISO-8601) |
 | `/verify` | `token` | `userId`, `email` while the session is valid and the user may enter the application |
+| `/session/revoke` | `token` | `200` with `signOutUrl` when the session was ended, `204` when there was none to end |
+
+`/session/revoke` makes Identity stop accepting the token at once. `signOutUrl` is on Identity's host and valid
+for a minute: the connector sends the browser there, Identity ends the user's own sign-in to the organization and
+returns the browser to the application. The connector follows it only when it is on the host it was given.
 
 ## Sign-In On The Application's Own Page
 

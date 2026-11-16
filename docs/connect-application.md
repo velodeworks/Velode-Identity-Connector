@@ -119,7 +119,10 @@ To sign out, post a form to `/velode-identity/logout`:
 </form>
 ```
 
-It clears the app's cookie; the Identity session remains signed in. A link to that address answers `405`, and a
+It ends the session everywhere: Identity stops accepting the token at once, the app's cookie is cleared and the
+browser passes by Identity, which ends the user's sign-in to the organization and returns them to the application
+(its home, or the page set for it in the Identity panel). The next sign-in asks for credentials again. If
+Identity cannot be reached the user is still signed out of the app. A link to that address answers `405`, and a
 form posted by another site is refused with `403`, so other sites cannot sign users out. If the app keeps
 Spring Security's CSRF protection on, send its CSRF token with the form or exclude `/velode-identity/logout`;
 see the [security guide](security.md#what-the-application-must-do).

@@ -90,13 +90,18 @@ class IdentityClient {
     }
 
     private boolean onOrganizationHost(String candidate) {
+        return onIdentityHost(candidate) && URI.create(candidate).getRawQuery() == null;
+    }
+
+    /** Whether an address Identity names for the browser is on the host this application was given. */
+    boolean onIdentityHost(String candidate) {
         if (candidate == null) {
             return false;
         }
         try {
             URI given = URI.create(organizationUrl);
             URI told = URI.create(candidate);
-            return told.getRawUserInfo() == null && told.getRawQuery() == null && told.getRawFragment() == null
+            return told.getRawUserInfo() == null && told.getRawFragment() == null
                 && given.getScheme().equalsIgnoreCase(told.getScheme())
                 && given.getHost().equalsIgnoreCase(told.getHost())
                 && given.getPort() == told.getPort();
