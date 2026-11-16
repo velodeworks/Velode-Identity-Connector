@@ -64,9 +64,12 @@ public class VelodeIdentity {
         return connections.connected().isPresent();
     }
 
-    /** Identity's sign-in page; it returns the user to this application's callback with a one-time code. */
+    /**
+     * Identity's sign-in page; it returns the user to this application's callback with a one-time code. Identity
+     * says where that page is the first time it is needed.
+     */
     public Optional<String> loginUrl(String state) {
-        return connections.connected().map(connection -> properties.url() + "/login"
+        return connections.connected().map(connection -> client.loginUrl()
             + "?appSlug=" + encode(connection.appSlug())
             + "&returnTo=" + encode(properties.appUrl() + CALLBACK_PATH)
             + "&state=" + encode(state));
@@ -108,12 +111,28 @@ public class VelodeIdentity {
 
     /**
      * Stops trusting what Identity said about this token, so the next {@link #verify(String)} asks Identity.
-     * Call it when the application signs the user out by itself; the connector's own sign-out does.
+     * {@link #signOut(String)} does it and also ends the session at Identity.
      */
     public void forget(String token) {
         if (token != null) {
             verified.forget(VerifiedSessions.key(token));
         }
+    }
+
+    /**
+     * Ends the user's session in this application: Identity stops accepting the token at once, here and in every
+     * replica. Returns where to send the browser so that Identity also ends its own sign-in to the organization,
+     * after which the user is asked to sign in again; empty when the browser has nowhere else to go.
+     */
+    public Optional<String> signOut(String token) {
+        if (token == null || token.isBlank()) {
+            return Optional.empty();
+        }
+        forget(token);
+        return send("/session/revoke", Map.of("token", token))
+            .filter(response -> response.status() == 200)
+            .map(response -> response.text("signOutUrl"))
+            .filter(client::onIdentityHost);
     }
 
     /** Asks Identity, or waits for the answer when another request is already asking about the same session. */
@@ -251,6 +270,7 @@ public class VelodeIdentity {
                 .map(next -> new LoginStep(LoginStep.Next.EMAIL_CODE, next, null, null));
             case "TOTP" -> Optional.ofNullable(flow).map(next -> new LoginStep(LoginStep.Next.TOTP, next, null, null));
             case "DONE" -> session(response).map(this::confirmed);
+            case "HOSTED_LOGIN" -> Optional.of(new LoginStep(LoginStep.Next.HOSTED_LOGIN, null, null, null));
             default -> Optional.empty();
         };
         return step.orElseGet(() -> LoginStep.failed(LoginStep.LOGIN_FAILED));
@@ -402,7 +422,12 @@ public class VelodeIdentity {
         public enum Next {
             EMAIL_CODE,
             TOTP,
-            DONE
+            DONE,
+            /**
+             * The account finishes signing in on Identity's own page, as one whose only second factor is a
+             * security key does. Send the browser to {@code /velode-identity/login}.
+             */
+            HOSTED_LOGIN
         }
     }
 

@@ -18,13 +18,11 @@ class VelodeIdentityPropertiesTest {
     private static final String APP_URL = "https://lista.velode.io";
 
     @Test
-    void should_AcceptHttpsAddressesAndDeriveTheApiBase() {
+    void should_AcceptHttpsAddressesWithoutTheirTrailingSlash() {
         VelodeIdentityProperties properties = new VelodeIdentityProperties(ORGANIZATION_URL + "/", APP_URL + "/", null, null, null, null, null);
 
         assertThat(properties.url()).isEqualTo(ORGANIZATION_URL);
         assertThat(properties.appUrl()).isEqualTo(APP_URL);
-        assertThat(properties.apiUrl())
-            .isEqualTo("https://iam.velode.io/api/organizations/891602e0-f43a-41de-a768-281aeaf8b913");
     }
 
     @Test

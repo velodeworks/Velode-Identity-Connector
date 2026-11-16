@@ -64,6 +64,9 @@ class VelodeIdentityTest {
     private final Set<String> pendingKeys = new HashSet<>();
     private final List<String> requests = new ArrayList<>();
     private final MemoryStore store = new MemoryStore();
+    private final java.util.concurrent.atomic.AtomicInteger discoveries = new java.util.concurrent.atomic.AtomicInteger();
+    private volatile String toldAddresses;
+    private volatile String signOutUrl;
     private volatile String approvedKey;
     private volatile boolean sessionEnded;
     private volatile boolean identityBusy;
@@ -78,15 +81,70 @@ class VelodeIdentityTest {
     void startIdentity() throws IOException {
         identity = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
         identity.createContext("/api/organizations/" + ORGANIZATION, this::answer);
+        identity.createContext("/o/" + ORGANIZATION + "/.well-known/velode-identity", this::tellAddresses);
         identity.start();
         clock = new MutableClock(NOW);
         connections = manager();
-        velodeIdentity = new VelodeIdentity(properties(), connections, new IdentityClient(properties().apiUrl()));
+        velodeIdentity = new VelodeIdentity(properties(), connections, new IdentityClient(properties().url()));
     }
 
     @AfterEach
     void stopIdentity() {
         identity.stop(0);
+    }
+
+    /** The connection key and session tokens go where Identity says, so it is believed only about its own host. */
+    @Test
+    void should_AskIdentityOnceWhereTheOrganizationIsAndRefuseAnotherHost() {
+        int before = discoveries.get();
+        IdentityClient client = new IdentityClient(properties().url());
+        client.loginUrl();
+        client.loginUrl();
+        client.post("/verify", "key", java.util.Map.of("token", "valid-token"));
+        assertThat(discoveries.get() - before).isEqualTo(1);
+
+        toldAddresses = "{\"success\":true,\"data\":{\"organizationId\":\"" + ORGANIZATION
+            + "\",\"loginUrl\":\"http://localhost:" + identity.getAddress().getPort() + "/sign-in\","
+            + "\"apiUrl\":\"https://elsewhere.example/api/organizations/" + ORGANIZATION + "\"}}";
+        IdentityClient misled = new IdentityClient(properties().url());
+
+        assertThatThrownBy(misled::loginUrl).isInstanceOf(IdentityUnavailableException.class);
+        assertThatThrownBy(() -> misled.post("/verify", "key", java.util.Map.of("token", "valid-token")))
+            .isInstanceOf(IdentityUnavailableException.class);
+    }
+
+    /** An account whose only second factor is a security key finishes on Identity's own page. */
+    @Test
+    void should_SendTheUserToIdentitysPage_when_TheAccountFinishesSigningInThere() {
+        connections.maintain();
+        approve();
+        connections.maintain();
+        VelodeIdentity.LoginFlow flow = velodeIdentity.startLogin("user@velode.io", BROWSER, null).flow();
+
+        VelodeIdentity.LoginStep step = velodeIdentity.submitLoginCode(flow, "55555555", BROWSER);
+
+        assertThat(step.failed()).isFalse();
+        assertThat(step.next()).isEqualTo(VelodeIdentity.LoginStep.Next.HOSTED_LOGIN);
+        assertThat(step.session()).isNull();
+    }
+
+    /** A sign-out ends the session at Identity at once; where the browser goes next is believed only on Identity's host. */
+    @Test
+    void should_EndTheSessionAtIdentityAndSayWhereTheBrowserGoes_when_UserSignsOut() {
+        connections.maintain();
+        approve();
+        connections.maintain();
+        signOutUrl = "http://localhost:" + identity.getAddress().getPort() + "/o/" + ORGANIZATION + "/logout/return?ticket=t";
+        assertThat(velodeIdentity.verify("valid-token")).isPresent();
+
+        assertThat(velodeIdentity.signOut("valid-token")).contains(signOutUrl);
+        assertThat(velodeIdentity.verify("valid-token")).isEmpty();
+        // Nothing left to end: the browser stays in the application.
+        assertThat(velodeIdentity.signOut("valid-token")).isEmpty();
+
+        sessionEnded = false;
+        signOutUrl = "https://elsewhere.example/logout/return?ticket=t";
+        assertThat(velodeIdentity.signOut("valid-token")).isEmpty();
     }
 
     @Test
@@ -98,14 +156,15 @@ class VelodeIdentityTest {
         assertThat(velodeIdentity.verify("valid-token")).isEmpty();
         assertThat(pendingKeys).hasSize(1);
         assertThat(requests.getFirst()).contains("\"origin\":\"https://lista.velode.io\"",
-            "\"name\":\"Lista \\\"beta\\\"\"", "\"invitation\":\"" + INVITATION + "\"");
+            "\"name\":\"Lista \\\"beta\\\"\"", "\"invitation\":\"" + INVITATION + "\"",
+            "\"callbackPath\":\"/velode-identity/callback\"");
 
         // The invitation is used by now; Identity knows the key and no longer looks at it.
         approve();
         connections.maintain();
 
         assertThat(velodeIdentity.loginUrl("a b")).contains(
-            "http://localhost:" + identity.getAddress().getPort() + "/o/" + ORGANIZATION + "/login?appSlug=lista"
+            "http://localhost:" + identity.getAddress().getPort() + "/sign-in?appSlug=lista"
                 + "&returnTo=https%3A%2F%2Flista.velode.io%2Fvelode-identity%2Fcallback&state=a+b");
         assertThat(velodeIdentity.verify("valid-token")).hasValueSatisfying(user -> {
             assertThat(user.userId()).hasToString(USER_ID);
@@ -148,7 +207,7 @@ class VelodeIdentityTest {
         assertThat(approvedKey).isNotEqualTo(firstKey);
         assertThat(connections.connected()).map(Connection::key).contains(approvedKey);
 
-        VelodeIdentity replicaIdentity = new VelodeIdentity(properties(), replica, new IdentityClient(properties().apiUrl()));
+        VelodeIdentity replicaIdentity = new VelodeIdentity(properties(), replica, new IdentityClient(properties().url()));
         assertThat(replicaIdentity.verify("valid-token")).isPresent();
         assertThat(replica.connected()).map(Connection::key).contains(approvedKey);
     }
@@ -205,7 +264,7 @@ class VelodeIdentityTest {
         assertThat(connections.connected()).map(Connection::key).contains(approvedKey);
         assertThat(replica.connected()).map(Connection::key).contains(approvedKey);
         assertThat(velodeIdentity.verify("valid-token")).isPresent();
-        assertThat(new VelodeIdentity(properties(), replica, new IdentityClient(properties().apiUrl()))
+        assertThat(new VelodeIdentity(properties(), replica, new IdentityClient(properties().url()))
             .verify("valid-token")).isPresent();
         assertThat(pendingKeys).isEmpty();
     }
@@ -257,7 +316,7 @@ class VelodeIdentityTest {
         connect();
         ConnectionManager replica = manager();
         replica.maintain();
-        VelodeIdentity replicaIdentity = new VelodeIdentity(properties(), replica, new IdentityClient(properties().apiUrl()));
+        VelodeIdentity replicaIdentity = new VelodeIdentity(properties(), replica, new IdentityClient(properties().url()));
         approvedKey = null;
         CountDownLatch ready = new CountDownLatch(2);
         CountDownLatch release = new CountDownLatch(1);
@@ -321,7 +380,7 @@ class VelodeIdentityTest {
         assertThat(pendingKeys).hasSize(1).doesNotContain(disconnectedKey);
         approve();
         restarted.maintain();
-        assertThat(new VelodeIdentity(properties(), restarted, new IdentityClient(properties().apiUrl()))
+        assertThat(new VelodeIdentity(properties(), restarted, new IdentityClient(properties().url()))
             .verify("valid-token")).isPresent();
     }
 
@@ -544,7 +603,7 @@ class VelodeIdentityTest {
     ) {
         ConnectionManager restarted = manager();
         restarted.maintain();
-        return call.apply(new VelodeIdentity(properties(), restarted, new IdentityClient(properties().apiUrl())));
+        return call.apply(new VelodeIdentity(properties(), restarted, new IdentityClient(properties().url())));
     }
 
     private void connect() {
@@ -641,7 +700,7 @@ class VelodeIdentityTest {
     @Test
     void should_RememberNothing_when_IdentityDidNotAnswerAboutTheSession() {
         VelodeIdentity unconnected = new VelodeIdentity(
-            properties(Duration.ofSeconds(5), 100), connections, new IdentityClient(properties().apiUrl()),
+            properties(Duration.ofSeconds(5), 100), connections, new IdentityClient(properties().url()),
             new AtomicLong()::get, Runnable::run);
         assertThat(unconnected.verify("valid-token")).isEmpty();
 
@@ -746,7 +805,7 @@ class VelodeIdentityTest {
         AtomicLong nanos = new AtomicLong();
         connectOnce();
         VelodeIdentity small = new VelodeIdentity(
-            properties(Duration.ofSeconds(5), 2), connections, new IdentityClient(properties().apiUrl()),
+            properties(Duration.ofSeconds(5), 2), connections, new IdentityClient(properties().url()),
             nanos::get, Runnable::run);
 
         assertThat(small.verify("valid-token-1")).isPresent();
@@ -772,7 +831,7 @@ class VelodeIdentityTest {
     private VelodeIdentity remembering(Duration kept, AtomicLong nanos, Executor renewals) {
         connectOnce();
         VelodeIdentityProperties properties = properties(kept, 100);
-        return new VelodeIdentity(properties, connections, new IdentityClient(properties.apiUrl()), nanos::get, renewals);
+        return new VelodeIdentity(properties, connections, new IdentityClient(properties.url()), nanos::get, renewals);
     }
 
     private void connectOnce() {
@@ -826,7 +885,7 @@ class VelodeIdentityTest {
     /** A replica of the application started with the given invitation, or with none. */
     private ConnectionManager startedWith(String invitation) {
         return new ConnectionManager(properties(invitation), "Lista \"beta\"", store,
-            new IdentityClient(properties().apiUrl()), clock, new SecureRandom());
+            new IdentityClient(properties().url()), clock, new SecureRandom());
     }
 
     private VelodeIdentityProperties properties() {
@@ -837,6 +896,15 @@ class VelodeIdentityTest {
         return new VelodeIdentityProperties(
             "http://localhost:" + identity.getAddress().getPort() + "/o/" + ORGANIZATION + "/", "https://lista.velode.io/", null, null, Duration.ZERO, null,
             invitation);
+    }
+
+    /** Identity says where the organization is reached; its sign-in page is not where the connector would guess. */
+    private void tellAddresses(HttpExchange exchange) throws IOException {
+        discoveries.incrementAndGet();
+        String host = "http://localhost:" + identity.getAddress().getPort();
+        respond(exchange, 200, toldAddresses != null ? toldAddresses
+            : "{\"success\":true,\"data\":{\"organizationId\":\"" + ORGANIZATION + "\",\"loginUrl\":\"" + host
+                + "/sign-in\",\"apiUrl\":\"" + host + "/api/organizations/" + ORGANIZATION + "\"}}");
     }
 
     private synchronized void answer(HttpExchange exchange) throws IOException {
@@ -873,6 +941,14 @@ class VelodeIdentityTest {
         } else if (body.contains("oversized-")) {
             respond(exchange, 200, "{\"success\":true,\"data\":{\"userId\":\"" + USER_ID + "\",\"email\":\""
                 + "a".repeat(70_000) + "@velode.io\"}}");
+        } else if ("/session/revoke".equals(path)) {
+            // Identity ends the session and, when the browser is signed in to it, says where to end that too.
+            if (body.contains("valid-token") && !sessionEnded) {
+                sessionEnded = true;
+                respond(exchange, 200, "{\"success\":true,\"data\":{\"signOutUrl\":\"" + signOutUrl + "\"}}");
+            } else {
+                respond(exchange, 204, "");
+            }
         } else if ("/connection/rotate".equals(path)) {
             approvedKey = body.replaceAll(".*\"newKey\":\"([^\"]+)\".*", "$1");
             respond(exchange, 204, "");
@@ -900,6 +976,8 @@ class VelodeIdentityTest {
             case "email-code" -> {
                 if (ownFlow && body.contains("\"code\":\"22222222\"")) {
                     respond(exchange, 200, "{\"success\":true,\"data\":{\"next\":\"TOTP\"}}");
+                } else if (ownFlow && body.contains("\"code\":\"55555555\"")) {
+                    respond(exchange, 200, "{\"success\":true,\"data\":{\"next\":\"HOSTED_LOGIN\"}}");
                 } else if (ownFlow && body.contains("\"code\":\"44444444\"")) {
                     respond(exchange, 200, "{\"success\":true,\"data\":{\"next\":\"DONE\",\"userId\":\"" + USER_ID
                         + "\",\"sessionToken\":\"valid-token\"}}");

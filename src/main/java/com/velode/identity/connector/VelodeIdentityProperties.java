@@ -74,12 +74,6 @@ public record VelodeIdentityProperties(
         return "VelodeIdentityProperties[url=" + url + ", appUrl=" + appUrl + "]";
     }
 
-    /** Server-to-server base of the organization. */
-    String apiUrl() {
-        int segment = url.lastIndexOf(ORGANIZATION_SEGMENT);
-        return url.substring(0, segment) + "/api/organizations/" + url.substring(segment + ORGANIZATION_SEGMENT.length());
-    }
-
     /** This application's origin as browsers name it in the {@code Origin} header. */
     String appOrigin() {
         URI uri = URI.create(appUrl);

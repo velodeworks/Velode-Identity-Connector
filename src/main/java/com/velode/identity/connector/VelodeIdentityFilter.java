@@ -151,7 +151,10 @@ class VelodeIdentityFilter extends HttpFilter {
             json(response, status(step.error()), Map.of("error", step.error()));
             return;
         }
-        if (step.next() == LoginStep.Next.DONE) {
+        if (step.next() == LoginStep.Next.HOSTED_LOGIN) {
+            // The sign-in continues on Identity's page, so this flow is over.
+            response.addCookie(cookie(FLOW_COOKIE, "", Duration.ZERO, request));
+        } else if (step.next() == LoginStep.Next.DONE) {
             Duration lifetime = Duration.between(Instant.now(), step.session().expiresAt());
             response.addCookie(cookie(VelodeIdentity.SESSION_COOKIE, step.session().token(), lifetime, request));
             response.addCookie(cookie(FLOW_COOKIE, "", Duration.ZERO, request));
@@ -214,7 +217,13 @@ class VelodeIdentityFilter extends HttpFilter {
         byte[] bytes = new byte[24];
         random.nextBytes(bytes);
         String state = Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
-        Optional<String> loginUrl = identity.loginUrl(state);
+        Optional<String> loginUrl;
+        try {
+            loginUrl = identity.loginUrl(state);
+        } catch (IdentityUnavailableException exception) {
+            response.sendError(HttpServletResponse.SC_SERVICE_UNAVAILABLE, "Sign-in is not available right now");
+            return;
+        }
         if (loginUrl.isEmpty()) {
             response.sendError(HttpServletResponse.SC_SERVICE_UNAVAILABLE, "Sign-in is not available yet");
             return;
@@ -268,16 +277,28 @@ class VelodeIdentityFilter extends HttpFilter {
             response.sendError(HttpServletResponse.SC_FORBIDDEN, "Sign-out must start in this application");
             return;
         }
-        // The user is signed out here at once, not when the connector next asks Identity about the session.
+        // The user is signed out here at once, and at Identity too: the token stops being valid everywhere and
+        // the browser passes by Identity, which ends its own sign-in and brings the user back.
+        String next = request.getContextPath() + HOME;
         if (request.getCookies() != null) {
             for (Cookie cookie : request.getCookies()) {
                 if (VelodeIdentity.SESSION_COOKIE.equals(cookie.getName())) {
-                    identity.forget(cookie.getValue());
+                    next = signedOutAt(cookie.getValue()).orElse(next);
                 }
             }
         }
         response.addCookie(cookie(VelodeIdentity.SESSION_COOKIE, "", Duration.ZERO, request));
-        response.sendRedirect(request.getContextPath() + HOME);
+        response.sendRedirect(next);
+    }
+
+    /** A sign-out does not wait for Identity: unreachable, the user is still signed out of this application. */
+    private Optional<String> signedOutAt(String token) {
+        try {
+            return identity.signOut(token);
+        } catch (IdentityUnavailableException exception) {
+            identity.forget(token);
+            return Optional.empty();
+        }
     }
 
     /**
