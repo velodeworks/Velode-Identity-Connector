@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.7.0
+
+### Upgrade Notes
+
+- This version needs an Identity that says where an organization is reached. The connector reads it once, from the
+  organization address it is given, the first time it needs it; `velode.identity.url` stays as it is. Against an
+  older Identity sign-in answers `503`.
+
+### Changed
+
+- The connector no longer deduces Identity's sign-in page and API from the organization address: Identity tells
+  them, and is believed only when both are on the host of that address, since the connection key and session
+  tokens travel there.
+
 ## 0.6.0
 
 ### Upgrade Notes

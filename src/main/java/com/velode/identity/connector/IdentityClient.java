@@ -26,28 +26,88 @@ class IdentityClient {
      */
     private static final int MAX_RESPONSE_BYTES = 64 * 1024;
 
-    private final String apiUrl;
+    private static final String DISCOVERY_PATH = "/.well-known/velode-identity";
+    private static final String ORGANIZATION_SEGMENT = "/o/";
+
+    private final String organizationUrl;
+    /** Read from Identity once and kept: a process that must read it again is restarted. */
+    private volatile Addresses addresses;
     // A redirect could carry the connection key to another host, so Identity's answer is taken as it is.
     private final HttpClient http = HttpClient.newBuilder()
         .connectTimeout(TIMEOUT)
         .followRedirects(HttpClient.Redirect.NEVER)
         .build();
 
-    IdentityClient(String apiUrl) {
-        this.apiUrl = apiUrl;
+    /** @param organizationUrl the organization address from the Identity panel, the only one this application is given */
+    IdentityClient(String organizationUrl) {
+        this.organizationUrl = organizationUrl;
+    }
+
+    /** Identity's sign-in page for the organization, to which a browser is sent. */
+    String loginUrl() {
+        return addresses().loginUrl();
     }
 
     /** Returns the HTTP status with the {@code data} object of a success or the fields of an error. */
     Response post(String path, String key, Map<String, String> body) {
-        HttpRequest.Builder request = HttpRequest.newBuilder(URI.create(apiUrl + path))
+        HttpRequest.Builder request = HttpRequest.newBuilder(URI.create(addresses().apiUrl() + path))
             .timeout(TIMEOUT)
             .header("Content-Type", "application/json")
             .POST(HttpRequest.BodyPublishers.ofString(json(body)));
         if (key != null) {
             request.header(KEY_HEADER, key);
         }
+        return send(request.build());
+    }
+
+    /**
+     * Where Identity says the organization is reached. Identity tells; the connector deduces nothing from the
+     * address it was given. Both addresses must be on the host of that address, since session tokens and the
+     * connection key travel to them.
+     */
+    private Addresses addresses() {
+        Addresses known = addresses;
+        if (known != null) {
+            return known;
+        }
+        Response response = send(HttpRequest.newBuilder(URI.create(organizationUrl + DISCOVERY_PATH))
+            .timeout(TIMEOUT)
+            .header("Accept", "application/json")
+            .GET()
+            .build());
+        String loginUrl = response.text("loginUrl");
+        String apiUrl = response.text("apiUrl");
+        String organizationId = organizationUrl.substring(
+            organizationUrl.lastIndexOf(ORGANIZATION_SEGMENT) + ORGANIZATION_SEGMENT.length());
+        if (response.status() != 200 || !organizationId.equalsIgnoreCase(response.text("organizationId"))
+            || !onOrganizationHost(loginUrl) || !onOrganizationHost(apiUrl)) {
+            throw new IdentityUnavailableException("Velode Identity did not say where the organization at "
+                + organizationUrl + " is reached; check velode.identity.url and that Identity is up to date", null);
+        }
+        known = new Addresses(loginUrl, apiUrl);
+        addresses = known;
+        return known;
+    }
+
+    private boolean onOrganizationHost(String candidate) {
+        if (candidate == null) {
+            return false;
+        }
         try {
-            HttpResponse<InputStream> response = http.send(request.build(), HttpResponse.BodyHandlers.ofInputStream());
+            URI given = URI.create(organizationUrl);
+            URI told = URI.create(candidate);
+            return told.getRawUserInfo() == null && told.getRawQuery() == null && told.getRawFragment() == null
+                && given.getScheme().equalsIgnoreCase(told.getScheme())
+                && given.getHost().equalsIgnoreCase(told.getHost())
+                && given.getPort() == told.getPort();
+        } catch (IllegalArgumentException | NullPointerException exception) {
+            return false;
+        }
+    }
+
+    private Response send(HttpRequest request) {
+        try {
+            HttpResponse<InputStream> response = http.send(request, HttpResponse.BodyHandlers.ofInputStream());
             try (InputStream answer = response.body()) {
                 byte[] bytes = answer.readNBytes(MAX_RESPONSE_BYTES + 1);
                 if (bytes.length > MAX_RESPONSE_BYTES) {
@@ -102,6 +162,9 @@ class IdentityClient {
             }
         }
         return escaped.toString();
+    }
+
+    private record Addresses(String loginUrl, String apiUrl) {
     }
 
     record Response(int status, Map<String, Object> data) {

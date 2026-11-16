@@ -64,6 +64,8 @@ class VelodeIdentityTest {
     private final Set<String> pendingKeys = new HashSet<>();
     private final List<String> requests = new ArrayList<>();
     private final MemoryStore store = new MemoryStore();
+    private final java.util.concurrent.atomic.AtomicInteger discoveries = new java.util.concurrent.atomic.AtomicInteger();
+    private volatile String toldAddresses;
     private volatile String approvedKey;
     private volatile boolean sessionEnded;
     private volatile boolean identityBusy;
@@ -78,15 +80,36 @@ class VelodeIdentityTest {
     void startIdentity() throws IOException {
         identity = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
         identity.createContext("/api/organizations/" + ORGANIZATION, this::answer);
+        identity.createContext("/o/" + ORGANIZATION + "/.well-known/velode-identity", this::tellAddresses);
         identity.start();
         clock = new MutableClock(NOW);
         connections = manager();
-        velodeIdentity = new VelodeIdentity(properties(), connections, new IdentityClient(properties().apiUrl()));
+        velodeIdentity = new VelodeIdentity(properties(), connections, new IdentityClient(properties().url()));
     }
 
     @AfterEach
     void stopIdentity() {
         identity.stop(0);
+    }
+
+    /** The connection key and session tokens go where Identity says, so it is believed only about its own host. */
+    @Test
+    void should_AskIdentityOnceWhereTheOrganizationIsAndRefuseAnotherHost() {
+        int before = discoveries.get();
+        IdentityClient client = new IdentityClient(properties().url());
+        client.loginUrl();
+        client.loginUrl();
+        client.post("/verify", "key", java.util.Map.of("token", "valid-token"));
+        assertThat(discoveries.get() - before).isEqualTo(1);
+
+        toldAddresses = "{\"success\":true,\"data\":{\"organizationId\":\"" + ORGANIZATION
+            + "\",\"loginUrl\":\"http://localhost:" + identity.getAddress().getPort() + "/sign-in\","
+            + "\"apiUrl\":\"https://elsewhere.example/api/organizations/" + ORGANIZATION + "\"}}";
+        IdentityClient misled = new IdentityClient(properties().url());
+
+        assertThatThrownBy(misled::loginUrl).isInstanceOf(IdentityUnavailableException.class);
+        assertThatThrownBy(() -> misled.post("/verify", "key", java.util.Map.of("token", "valid-token")))
+            .isInstanceOf(IdentityUnavailableException.class);
     }
 
     @Test
@@ -105,7 +128,7 @@ class VelodeIdentityTest {
         connections.maintain();
 
         assertThat(velodeIdentity.loginUrl("a b")).contains(
-            "http://localhost:" + identity.getAddress().getPort() + "/o/" + ORGANIZATION + "/login?appSlug=lista"
+            "http://localhost:" + identity.getAddress().getPort() + "/sign-in?appSlug=lista"
                 + "&returnTo=https%3A%2F%2Flista.velode.io%2Fvelode-identity%2Fcallback&state=a+b");
         assertThat(velodeIdentity.verify("valid-token")).hasValueSatisfying(user -> {
             assertThat(user.userId()).hasToString(USER_ID);
@@ -148,7 +171,7 @@ class VelodeIdentityTest {
         assertThat(approvedKey).isNotEqualTo(firstKey);
         assertThat(connections.connected()).map(Connection::key).contains(approvedKey);
 
-        VelodeIdentity replicaIdentity = new VelodeIdentity(properties(), replica, new IdentityClient(properties().apiUrl()));
+        VelodeIdentity replicaIdentity = new VelodeIdentity(properties(), replica, new IdentityClient(properties().url()));
         assertThat(replicaIdentity.verify("valid-token")).isPresent();
         assertThat(replica.connected()).map(Connection::key).contains(approvedKey);
     }
@@ -205,7 +228,7 @@ class VelodeIdentityTest {
         assertThat(connections.connected()).map(Connection::key).contains(approvedKey);
         assertThat(replica.connected()).map(Connection::key).contains(approvedKey);
         assertThat(velodeIdentity.verify("valid-token")).isPresent();
-        assertThat(new VelodeIdentity(properties(), replica, new IdentityClient(properties().apiUrl()))
+        assertThat(new VelodeIdentity(properties(), replica, new IdentityClient(properties().url()))
             .verify("valid-token")).isPresent();
         assertThat(pendingKeys).isEmpty();
     }
@@ -257,7 +280,7 @@ class VelodeIdentityTest {
         connect();
         ConnectionManager replica = manager();
         replica.maintain();
-        VelodeIdentity replicaIdentity = new VelodeIdentity(properties(), replica, new IdentityClient(properties().apiUrl()));
+        VelodeIdentity replicaIdentity = new VelodeIdentity(properties(), replica, new IdentityClient(properties().url()));
         approvedKey = null;
         CountDownLatch ready = new CountDownLatch(2);
         CountDownLatch release = new CountDownLatch(1);
@@ -321,7 +344,7 @@ class VelodeIdentityTest {
         assertThat(pendingKeys).hasSize(1).doesNotContain(disconnectedKey);
         approve();
         restarted.maintain();
-        assertThat(new VelodeIdentity(properties(), restarted, new IdentityClient(properties().apiUrl()))
+        assertThat(new VelodeIdentity(properties(), restarted, new IdentityClient(properties().url()))
             .verify("valid-token")).isPresent();
     }
 
@@ -544,7 +567,7 @@ class VelodeIdentityTest {
     ) {
         ConnectionManager restarted = manager();
         restarted.maintain();
-        return call.apply(new VelodeIdentity(properties(), restarted, new IdentityClient(properties().apiUrl())));
+        return call.apply(new VelodeIdentity(properties(), restarted, new IdentityClient(properties().url())));
     }
 
     private void connect() {
@@ -641,7 +664,7 @@ class VelodeIdentityTest {
     @Test
     void should_RememberNothing_when_IdentityDidNotAnswerAboutTheSession() {
         VelodeIdentity unconnected = new VelodeIdentity(
-            properties(Duration.ofSeconds(5), 100), connections, new IdentityClient(properties().apiUrl()),
+            properties(Duration.ofSeconds(5), 100), connections, new IdentityClient(properties().url()),
             new AtomicLong()::get, Runnable::run);
         assertThat(unconnected.verify("valid-token")).isEmpty();
 
@@ -746,7 +769,7 @@ class VelodeIdentityTest {
         AtomicLong nanos = new AtomicLong();
         connectOnce();
         VelodeIdentity small = new VelodeIdentity(
-            properties(Duration.ofSeconds(5), 2), connections, new IdentityClient(properties().apiUrl()),
+            properties(Duration.ofSeconds(5), 2), connections, new IdentityClient(properties().url()),
             nanos::get, Runnable::run);
 
         assertThat(small.verify("valid-token-1")).isPresent();
@@ -772,7 +795,7 @@ class VelodeIdentityTest {
     private VelodeIdentity remembering(Duration kept, AtomicLong nanos, Executor renewals) {
         connectOnce();
         VelodeIdentityProperties properties = properties(kept, 100);
-        return new VelodeIdentity(properties, connections, new IdentityClient(properties.apiUrl()), nanos::get, renewals);
+        return new VelodeIdentity(properties, connections, new IdentityClient(properties.url()), nanos::get, renewals);
     }
 
     private void connectOnce() {
@@ -826,7 +849,7 @@ class VelodeIdentityTest {
     /** A replica of the application started with the given invitation, or with none. */
     private ConnectionManager startedWith(String invitation) {
         return new ConnectionManager(properties(invitation), "Lista \"beta\"", store,
-            new IdentityClient(properties().apiUrl()), clock, new SecureRandom());
+            new IdentityClient(properties().url()), clock, new SecureRandom());
     }
 
     private VelodeIdentityProperties properties() {
@@ -837,6 +860,15 @@ class VelodeIdentityTest {
         return new VelodeIdentityProperties(
             "http://localhost:" + identity.getAddress().getPort() + "/o/" + ORGANIZATION + "/", "https://lista.velode.io/", null, null, Duration.ZERO, null,
             invitation);
+    }
+
+    /** Identity says where the organization is reached; its sign-in page is not where the connector would guess. */
+    private void tellAddresses(HttpExchange exchange) throws IOException {
+        discoveries.incrementAndGet();
+        String host = "http://localhost:" + identity.getAddress().getPort();
+        respond(exchange, 200, toldAddresses != null ? toldAddresses
+            : "{\"success\":true,\"data\":{\"organizationId\":\"" + ORGANIZATION + "\",\"loginUrl\":\"" + host
+                + "/sign-in\",\"apiUrl\":\"" + host + "/api/organizations/" + ORGANIZATION + "\"}}");
     }
 
     private synchronized void answer(HttpExchange exchange) throws IOException {

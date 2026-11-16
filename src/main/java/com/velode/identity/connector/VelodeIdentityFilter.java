@@ -214,7 +214,13 @@ class VelodeIdentityFilter extends HttpFilter {
         byte[] bytes = new byte[24];
         random.nextBytes(bytes);
         String state = Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
-        Optional<String> loginUrl = identity.loginUrl(state);
+        Optional<String> loginUrl;
+        try {
+            loginUrl = identity.loginUrl(state);
+        } catch (IdentityUnavailableException exception) {
+            response.sendError(HttpServletResponse.SC_SERVICE_UNAVAILABLE, "Sign-in is not available right now");
+            return;
+        }
         if (loginUrl.isEmpty()) {
             response.sendError(HttpServletResponse.SC_SERVICE_UNAVAILABLE, "Sign-in is not available yet");
             return;
