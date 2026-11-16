@@ -82,7 +82,7 @@ is the only thing that talks to Identity. Requires Identity with the `login-flow
 | `GET /velode-identity/flow/options` | — | `{"turnstileSiteKey", "turnstileAction"}` when Turnstile is required, else `{}` |
 | `POST /velode-identity/flow/start` | `{"email", "turnstileToken"?}` | `{"next":"EMAIL_CODE"}` |
 | `POST /velode-identity/flow/resend` | `{"turnstileToken"?}` | `{"next":"EMAIL_CODE"}` |
-| `POST /velode-identity/flow/code` | `{"code"}` | `{"next":"TOTP"}` or `{"next":"DONE"}` |
+| `POST /velode-identity/flow/code` | `{"code"}` | `{"next":"TOTP"}`, `{"next":"DONE"}` or `{"next":"HOSTED_LOGIN"}` |
 | `POST /velode-identity/flow/totp` | `{"code"}` | `{"next":"DONE"}` |
 
 ```js
@@ -97,7 +97,9 @@ const { next } = await step("code", { code }); // TOTP asks for the authenticato
 ```
 
 The flow lives in an `HttpOnly` cookie that page scripts never see; `DONE` sets the same session cookie as the
-redirect sign-in, after Identity confirms the session it issued. Requests must be JSON and come from the page's own
+redirect sign-in, after Identity confirms the session it issued. `HOSTED_LOGIN` means the account finishes
+on Identity's own page, as one whose only second factor is a security key does: send the browser to
+`/velode-identity/login`. Requests must be JSON and come from the page's own
 origin: a `POST` whose `Origin` differs from `velode.identity.app-url`, or whose `Sec-Fetch-Site` is not
 `same-origin`, answers `403` `{"error":"CROSS_ORIGIN"}`. Serve the page from that origin. Failures answer
 `{"error": CODE}`: `INVALID_CODE` (wrong, used or expired code: ask again or restart), `TURNSTILE_REJECTED`,

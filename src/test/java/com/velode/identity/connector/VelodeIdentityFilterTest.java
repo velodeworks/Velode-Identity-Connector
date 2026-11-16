@@ -173,9 +173,35 @@ class VelodeIdentityFilterTest {
         MockHttpServletRequest signOut = signOut();
         signOut.setCookies(new Cookie("another", "value"), new Cookie(VelodeIdentity.SESSION_COOKIE, SESSION_TOKEN));
 
-        send(signOut);
+        MockHttpServletResponse home = send(signOut);
 
-        assertThat(identity.forgotten).containsExactly(SESSION_TOKEN);
+        assertThat(identity.signedOut).containsExactly(SESSION_TOKEN);
+        assertThat(home.getRedirectedUrl()).isEqualTo("/");
+    }
+
+    /** Identity ends its own sign-in too, so the next "sign in" asks for credentials again. */
+    @Test
+    void should_PassByIdentity_when_ItHasASignInToEnd() throws Exception {
+        identity.signOutUrl = "https://iam.velode.io/o/organization/logout/return?ticket=t";
+        MockHttpServletRequest signOut = signOut();
+        signOut.setCookies(new Cookie(VelodeIdentity.SESSION_COOKIE, SESSION_TOKEN));
+
+        MockHttpServletResponse signedOut = send(signOut);
+
+        assertThat(signedOut.getRedirectedUrl()).isEqualTo(identity.signOutUrl);
+        assertThat(signedOut.getCookie(VelodeIdentity.SESSION_COOKIE).getMaxAge()).isZero();
+    }
+
+    @Test
+    void should_SignOutHere_when_IdentityCannotBeReached() throws Exception {
+        MockHttpServletRequest signOut = signOut();
+        signOut.setCookies(new Cookie(VelodeIdentity.SESSION_COOKIE, "unreachable-token"));
+
+        MockHttpServletResponse signedOut = send(signOut);
+
+        assertThat(signedOut.getRedirectedUrl()).isEqualTo("/");
+        assertThat(signedOut.getCookie(VelodeIdentity.SESSION_COOKIE).getMaxAge()).isZero();
+        assertThat(identity.forgotten).containsExactly("unreachable-token");
     }
 
     /**
@@ -198,7 +224,7 @@ class VelodeIdentityFilterTest {
 
         assertThat(refused.getStatus()).isEqualTo(403);
         assertThat(refused.getCookie(VelodeIdentity.SESSION_COOKIE)).isNull();
-        assertThat(identity.forgotten).isEmpty();
+        assertThat(identity.signedOut).isEmpty();
     }
 
     @ParameterizedTest
@@ -317,6 +343,8 @@ class VelodeIdentityFilterTest {
 
         private final List<String> exchanged = new ArrayList<>();
         private final List<String> forgotten = new ArrayList<>();
+        private final List<String> signedOut = new ArrayList<>();
+        private String signOutUrl;
         private boolean connected = true;
 
         StubIdentity() {
@@ -328,6 +356,15 @@ class VelodeIdentityFilterTest {
         @Override
         public void forget(String token) {
             forgotten.add(token);
+        }
+
+        @Override
+        public Optional<String> signOut(String token) {
+            if ("unreachable-token".equals(token)) {
+                throw new IdentityUnavailableException("Velode Identity could not be reached", null);
+            }
+            signedOut.add(token);
+            return Optional.ofNullable(signOutUrl);
         }
 
         @Override

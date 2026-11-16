@@ -8,8 +8,20 @@
   organization address it is given, the first time it needs it; `velode.identity.url` stays as it is. Against an
   older Identity sign-in answers `503`.
 
+- Signing out now ends the session at Identity too. `POST /velode-identity/logout` makes Identity stop accepting
+  the token at once and sends the browser by Identity, which ends its own sign-in to the organization and returns
+  the user to the application: the next "sign in" asks for credentials again. Where the user lands is the page
+  set for the application in the Identity panel, its home unless changed. An application that signs users out by
+  itself calls `VelodeIdentity.signOut(token)` and redirects to the address it returns, when it returns one.
+- `LoginStep.Next` has a new value, `HOSTED_LOGIN`: the account finishes signing in on Identity's own page, as one
+  whose only second factor is a security key does. The connector's JSON steps answer `{"next":"HOSTED_LOGIN"}`;
+  send the browser to `/velode-identity/login`. An application that switches over `LoginStep.Next` without a
+  default must add the case to compile.
+
 ### Security
 
+- A session a user signed out of stays valid at Identity no longer; before, its token was accepted until it
+  expired, up to three days.
 - Identity returns a sign-in only to the application's callback, `/velode-identity/callback` on its address, and
   no longer to any page of that address. The connector declares it when it asks to connect, and the
   administrator sees it before approving. An application connected with an earlier version has it typed once
